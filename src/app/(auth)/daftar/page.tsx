@@ -4,7 +4,7 @@ import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
 import { AlertCircle, CheckCircle2, UserCheck, Eye, EyeOff } from 'lucide-react';
-import { StarLogo } from '../layout';
+import { StarLogo } from '@/components/ui/StarLogo';
 
 interface UnclaimedMember {
   id: string;

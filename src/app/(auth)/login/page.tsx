@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { AlertCircle, Eye, EyeOff } from 'lucide-react';
-import { StarLogo } from '../layout';
+import { StarLogo } from '@/components/ui/StarLogo';
 
 function LoginForm() {
   const router = useRouter();
