@@ -52,7 +52,6 @@ export function useSwapRequests() {
   }, [fetchRequests]);
 
   const handleCreateRequest = async (payload: {
-    requesterId: string;
     targetMemberId: string;
     dateRequester: string;
     dateTarget: string;

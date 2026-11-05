@@ -1,6 +1,5 @@
 import type { Metadata } from 'next';
-import Sidebar from '@/components/layout/Sidebar';
-import { SearchProvider } from '@/context/SearchContext';
+import { AuthProvider } from '@/context/AuthContext';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -15,13 +14,10 @@ export default function RootLayout({
 }) {
   return (
     <html lang="id">
-      <body className="flex min-h-screen bg-[#e8ecef]">
-        <SearchProvider>
-          <Sidebar />
-          <main className="flex-1 p-6 md:p-8 overflow-y-auto max-w-7xl mx-auto">
-            {children}
-          </main>
-        </SearchProvider>
+      <body className="bg-[#e8ecef] text-gray-900 antialiased min-h-screen">
+        <AuthProvider>
+          {children}
+        </AuthProvider>
       </body>
     </html>
   );

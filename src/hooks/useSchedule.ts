@@ -7,6 +7,7 @@ import {
   getWeeklySchedule,
 } from '@/services/schedule.service';
 import { createClient } from '@/lib/supabase/client';
+import { formatLocalDate } from '@/lib/utils/date';
 
 interface UseScheduleReturn {
   todayMember: Member | null;
@@ -48,10 +49,10 @@ export function useSchedule(
       setTodayMember(todayDuty);
       setWeeklySchedule(weekly);
 
-      // Tomorrow's member: find the day after today in weekly schedule
+      // Tomorrow's member using formatLocalDate (avoids UTC offset bug)
       const tomorrow = new Date();
       tomorrow.setDate(tomorrow.getDate() + 1);
-      const tomorrowFmt = tomorrow.toISOString().split('T')[0];
+      const tomorrowFmt = formatLocalDate(tomorrow);
       const tomorrowDay = weekly.find((d) => d.dateFormatted === tomorrowFmt);
       setTomorrowMember(tomorrowDay?.member ?? null);
     } catch (err) {
@@ -64,7 +65,6 @@ export function useSchedule(
   useEffect(() => {
     fetchSchedule();
 
-    // Realtime: re-fetch when schedule_overrides table changes
     const supabase = createClient();
     const channel = supabase
       .channel(`schedule-realtime-${Math.random().toString(36).substring(7)}`)

@@ -4,7 +4,7 @@ import {
   getDutyMemberForDate,
   getWeeklySchedule as computeWeeklySchedule,
 } from '@/lib/algorithms/scheduleRotation';
-import { format } from 'date-fns';
+import { formatLocalDate } from '@/lib/utils/date';
 
 /**
  * Fetch schedule overrides for a date range (YYYY-MM-DD).
@@ -13,7 +13,6 @@ async function getOverridesForRange(
   startDate: string,
   endDate: string
 ): Promise<ScheduleOverride[]> {
-  let dbOverrides: ScheduleOverride[] = [];
   try {
     const supabase = createClient();
     const { data, error } = await supabase
@@ -22,34 +21,16 @@ async function getOverridesForRange(
       .gte('date', startDate)
       .lte('date', endDate);
 
-    if (!error && data) {
-      dbOverrides = data as ScheduleOverride[];
+    if (error) {
+      console.warn('[schedule.service] getOverridesForRange error:', error.message);
+      return [];
     }
+
+    return (data as ScheduleOverride[]) || [];
   } catch (err) {
-    console.warn('[schedule.service] getOverridesForRange error:', err);
+    console.warn('[schedule.service] getOverridesForRange exception:', err);
+    return [];
   }
-
-  let localOverrides: ScheduleOverride[] = [];
-  if (typeof window !== 'undefined') {
-    try {
-      const raw = localStorage.getItem('kospiket_schedule_overrides');
-      if (raw) localOverrides = JSON.parse(raw);
-    } catch {}
-  }
-
-  const combinedMap = new Map<string, ScheduleOverride>();
-  for (const o of localOverrides) {
-    if (o.date >= startDate && o.date <= endDate) {
-      combinedMap.set(`${o.date}-${o.original_member_id}`, o);
-    }
-  }
-  for (const o of dbOverrides) {
-    if (o.date >= startDate && o.date <= endDate) {
-      combinedMap.set(`${o.date}-${o.original_member_id}`, o);
-    }
-  }
-
-  return Array.from(combinedMap.values());
 }
 
 /**
@@ -61,7 +42,7 @@ export async function getTodayDutyMember(
   startDate: string
 ): Promise<Member | null> {
   const today = new Date();
-  const todayStr = format(today, 'yyyy-MM-dd');
+  const todayStr = formatLocalDate(today);
 
   const overrides = await getOverridesForRange(todayStr, todayStr);
   const override = overrides.find((o) => o.date === todayStr);

@@ -10,35 +10,30 @@ interface LogFilters {
 export async function getCompletionLogs(
   filters: LogFilters = {}
 ): Promise<CompletionLog[]> {
-  try {
-    const supabase = createClient();
-    let query = supabase
-      .from('completion_logs')
-      .select('*, member:members(*)')
-      .order('date', { ascending: false });
+  const supabase = createClient();
+  let query = supabase
+    .from('completion_logs')
+    .select('*, member:members(*)')
+    .order('date', { ascending: false });
 
-    if (filters.memberId) {
-      query = query.eq('member_id', filters.memberId);
-    }
-    if (filters.startDate) {
-      query = query.gte('date', filters.startDate);
-    }
-    if (filters.endDate) {
-      query = query.lte('date', filters.endDate);
-    }
+  if (filters.memberId) {
+    query = query.eq('member_id', filters.memberId);
+  }
+  if (filters.startDate) {
+    query = query.gte('date', filters.startDate);
+  }
+  if (filters.endDate) {
+    query = query.lte('date', filters.endDate);
+  }
 
-    const { data, error } = await query;
+  const { data, error } = await query;
 
-    if (error) {
-      console.warn('[completion.service] getCompletionLogs error:', error.message);
-      return [];
-    }
-
-    return (data as CompletionLog[]) || [];
-  } catch (err) {
-    console.warn('[completion.service] getCompletionLogs fallback:', err);
+  if (error) {
+    console.warn('[completion.service] getCompletionLogs error:', error.message);
     return [];
   }
+
+  return (data as CompletionLog[]) || [];
 }
 
 /**
@@ -51,40 +46,27 @@ export async function upsertCompletionLog(
   completedTasks: string[] = [],
   note?: string
 ): Promise<CompletionLog> {
-  try {
-    const supabase = createClient();
-    const payload = {
-      member_id: memberId,
-      date,
-      status,
-      completed_tasks: completedTasks,
-      note: note || null,
-      completed_at: status === 'selesai' ? new Date().toISOString() : null,
-    };
+  const supabase = createClient();
+  const payload = {
+    member_id: memberId,
+    date,
+    status,
+    completed_tasks: completedTasks,
+    note: note || null,
+    completed_at: status === 'selesai' ? new Date().toISOString() : null,
+  };
 
-    const { data, error } = await supabase
-      .from('completion_logs')
-      .upsert(payload, { onConflict: 'date,member_id' })
-      .select()
-      .single();
+  const { data, error } = await supabase
+    .from('completion_logs')
+    .upsert(payload, { onConflict: 'date,member_id' })
+    .select()
+    .single();
 
-    if (error) {
-      throw new Error(error.message);
-    }
-
-    return data as CompletionLog;
-  } catch (err) {
-    console.warn('[completion.service] upsertCompletionLog fallback:', err);
-    return {
-      id: `temp-${Date.now()}`,
-      date,
-      member_id: memberId,
-      status,
-      completed_tasks: completedTasks,
-      note,
-      created_at: new Date().toISOString(),
-    };
+  if (error || !data) {
+    throw new Error(error?.message || 'Gagal menyimpan status piket');
   }
+
+  return data as CompletionLog;
 }
 
 /**

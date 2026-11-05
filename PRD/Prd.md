@@ -61,14 +61,18 @@ Pengguna cukup membuka aplikasi untuk mengetahui:
 
 ---
 
-## 4. Target Pengguna
+## 4. Target Pengguna & Peran (v2.2)
 
-**Persona: Penghuni Kost**
-- 3 orang yang tinggal serumah/sekost (Haris, Fahrul, Ishom), saling kenal, memakai HP sebagai alat utama.
-- Ingin kepastian jadwal tanpa perlu nego atau voting manual.
-- Butuh sistem yang bisa dibuka bersama (bukan aplikasi personal per akun terpisah, tapi satu sumber data yang sama untuk ketiganya).
+1. **User (Penghuni Kost)**:
+   - Anggota kost yang mendaftar mandiri via email + password, memilih slot anggota (1 slot = 1 akun unik).
+   - Akun berstatus `pending` setelah mendaftar dan membutuhkan persetujuan admin untuk aktif.
+   - Mengakses dashboard, konfirmasi piket miliknya sendiri, mengajukan tukar jadwal via RPC, dan menandai izin piket mandiri.
 
-Tidak ada peran "admin kost" formal yang terpisah dari anggota — di v1, ketiga anggota punya akses setara, salah satu bisa berperan mengatur pengaturan awal.
+2. **Admin (Pengelola Kost)**:
+   - Mengelola persetujuan pendaftaran akun (`pending` -> `approved`/`rejected`).
+   - Mengelola hak akses admin (promosi/demosi admin dengan perlindungan minimal 1 admin).
+   - Mengelola anggota kost, override jadwal manual, koreksi riwayat piket, pengaturan kost, daftar tugas, dan tata tertib.
+   - Memiliki dashboard khusus di `/admin` dengan layout dan sidebar terpisah.
 
 ---
 
@@ -337,7 +341,7 @@ flowchart TD
 | Performa | Dashboard dimuat < 2 detik pada koneksi normal. |
 | Sinkronisasi | Data harus real-time/near-real-time antar 3 anggota (satu sumber data bersama, bukan tersimpan lokal per perangkat). |
 | Ketersediaan | Aplikasi dapat diakses 24/7, cocok untuk hosting gratis/murah skala kecil. |
-| Keamanan | Autentikasi ringan (misal pilih nama + PIN 4 digit) cukup untuk skala 3 pengguna; tidak perlu sistem akun kompleks. |
+| Keamanan | Autentikasi Supabase Auth (Email + Password), otorisasi ditegakkan di database via Row Level Security (RLS) dan RPC SECURITY DEFINER (bukan hanya di UI). 1 akun terhubung ke 1 slot anggota (unik). Tidak menyimpan rahasia di client. |
 | Aksesibilitas | Kontras warna cukup, ukuran tombol nyaman disentuh di layar kecil. |
 
 ---

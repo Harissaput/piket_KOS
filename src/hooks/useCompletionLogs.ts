@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { CompletionLog, MemberStatus } from '@/types/database';
 import { getCompletionLogs, upsertCompletionLog } from '@/services/completion.service';
 import { createClient } from '@/lib/supabase/client';
@@ -16,17 +16,23 @@ export function useCompletionLogs(filters: UseCompletionLogsFilters = {}) {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const { memberId, startDate, endDate } = filters;
+  const memoizedFilters = useMemo(
+    () => ({ memberId, startDate, endDate }),
+    [memberId, startDate, endDate]
+  );
+
   const fetchLogs = useCallback(async () => {
     try {
       setError(null);
-      const data = await getCompletionLogs(filters);
+      const data = await getCompletionLogs(memoizedFilters);
       setLogs(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Gagal memuat riwayat');
     } finally {
       setIsLoading(false);
     }
-  }, [filters.memberId, filters.startDate, filters.endDate]);
+  }, [memoizedFilters]);
 
   useEffect(() => {
     fetchLogs();
