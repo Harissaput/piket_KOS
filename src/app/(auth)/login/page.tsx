@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { AlertCircle, Eye, EyeOff } from 'lucide-react';
 import { StarLogo } from '@/components/ui/StarLogo';
+import { getSafeRedirectPath } from '@/lib/utils/safeRedirect';
 
 function LoginForm() {
   const router = useRouter();
@@ -36,7 +37,11 @@ function LoginForm() {
       });
 
       if (error || !data.user) {
-        setErrorMessage('Email atau kata sandi yang Anda masukkan salah.');
+        if (error?.message?.toLowerCase().includes('email not confirmed')) {
+          setErrorMessage('Email Anda belum dikonfirmasi. Cek kotak masuk Anda.');
+        } else {
+          setErrorMessage('Email atau kata sandi yang Anda masukkan salah.');
+        }
         setIsLoading(false);
         return;
       }
@@ -59,14 +64,10 @@ function LoginForm() {
         return;
       }
 
-      const nextUrl = searchParams.get('next');
-      if (nextUrl && !nextUrl.startsWith('/login') && !nextUrl.startsWith('/daftar')) {
-        router.push(nextUrl);
-      } else if (profile.role === 'admin') {
-        router.push('/admin');
-      } else {
-        router.push('/');
-      }
+      const rawNext = searchParams.get('next');
+      const safeNext = getSafeRedirectPath(rawNext, profile.role === 'admin' ? '/admin' : '/');
+      router.refresh();
+      router.push(safeNext);
     } catch (err) {
       console.error('Login error:', err);
       setErrorMessage('Terjadi kesalahan saat masuk. Silakan coba lagi.');
@@ -133,7 +134,14 @@ function LoginForm() {
               {showPassword ? <EyeOff className="w-[18px] h-[18px]" /> : <Eye className="w-[18px] h-[18px]" />}
             </button>
           </div>
-
+          <div className="flex justify-end mt-2">
+            <Link
+              href="/lupa-password"
+              className="text-xs text-gray-500 hover:text-gray-900 transition-colors"
+            >
+              Lupa kata sandi?
+            </Link>
+          </div>
         </div>
 
         {/* Buttons */}
@@ -154,13 +162,30 @@ function LoginForm() {
           <button
             type="button"
             onClick={async () => {
-              const supabase = createClient();
-              await supabase.auth.signInWithOAuth({
-                provider: 'google',
-                options: {
-                  redirectTo: `${window.location.origin}/auth/callback`,
-                },
-              });
+              try {
+                setErrorMessage('');
+                const supabase = createClient();
+                const rawNext = searchParams.get('next');
+                const safeNext = getSafeRedirectPath(rawNext, '/');
+                const callbackUrl = new URL('/auth/callback', window.location.origin);
+                if (safeNext !== '/') {
+                  callbackUrl.searchParams.set('next', safeNext);
+                }
+
+                const { error } = await supabase.auth.signInWithOAuth({
+                  provider: 'google',
+                  options: {
+                    redirectTo: callbackUrl.toString(),
+                  },
+                });
+
+                if (error) {
+                  setErrorMessage(error.message || 'Gagal menghubungkan ke Google.');
+                }
+              } catch (err) {
+                console.error('Google login error:', err);
+                setErrorMessage('Terjadi kesalahan saat masuk dengan Google.');
+              }
             }}
             className="w-full py-3.5 bg-white hover:bg-gray-50 border border-gray-200 text-gray-700 rounded-full font-semibold text-sm transition-all duration-200 flex items-center justify-center gap-2.5"
           >

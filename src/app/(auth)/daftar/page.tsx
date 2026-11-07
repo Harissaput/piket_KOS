@@ -38,17 +38,13 @@ export default function RegisterPage() {
         const { data, error } = await supabase.rpc('get_unclaimed_members');
         if (error) {
           console.warn('get_unclaimed_members rpc error:', error);
-          const { data: members } = await supabase
-            .from('members')
-            .select('id, name, avatar_url, avatar_color, order_index')
-            .eq('status_aktif', true)
-            .order('order_index', { ascending: true });
-          setUnclaimedMembers((members as UnclaimedMember[]) || []);
+          setErrorMessage('Gagal memuat daftar slot anggota. Coba muat ulang halaman.');
         } else if (data) {
           setUnclaimedMembers(data as UnclaimedMember[]);
         }
       } catch (err) {
         console.warn('Error fetching unclaimed members:', err);
+        setErrorMessage('Gagal memuat daftar slot anggota. Coba muat ulang halaman.');
       } finally {
         setIsLoadingMembers(false);
       }
@@ -94,6 +90,13 @@ export default function RegisterPage() {
         } else {
           setErrorMessage(error.message || 'Pendaftaran gagal. Silakan coba lagi.');
         }
+        setIsSubmitting(false);
+        return;
+      }
+
+      // Deteksi jika email sudah terdaftar saat Confirm email aktif (Supabase mengembalikan user tanpa identities)
+      if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+        setErrorMessage('Email ini sudah terdaftar. Silakan gunakan email lain atau masuk.');
         setIsSubmitting(false);
         return;
       }
@@ -300,13 +303,23 @@ export default function RegisterPage() {
           <button
             type="button"
             onClick={async () => {
-              const supabase = createClient();
-              await supabase.auth.signInWithOAuth({
-                provider: 'google',
-                options: {
-                  redirectTo: `${window.location.origin}/auth/callback`,
-                },
-              });
+              try {
+                setErrorMessage('');
+                const supabase = createClient();
+                const callbackUrl = new URL('/auth/callback', window.location.origin);
+                const { error } = await supabase.auth.signInWithOAuth({
+                  provider: 'google',
+                  options: {
+                    redirectTo: callbackUrl.toString(),
+                  },
+                });
+                if (error) {
+                  setErrorMessage(error.message || 'Gagal mendaftar dengan Google.');
+                }
+              } catch (err) {
+                console.error('Google register error:', err);
+                setErrorMessage('Terjadi kesalahan saat mendaftar dengan Google.');
+              }
             }}
             className="w-full py-3.5 bg-white hover:bg-gray-50 border border-gray-200 text-gray-700 rounded-full font-semibold text-sm transition-all duration-200 flex items-center justify-center gap-2.5"
           >

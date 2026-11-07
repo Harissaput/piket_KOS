@@ -1,22 +1,34 @@
 import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
+import { getSafeRedirectPath } from '@/lib/utils/safeRedirect';
 
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
 
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://placeholder.supabase.co';
-  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'placeholder-key';
+  const rawUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const rawKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const isProd = process.env.NODE_ENV === 'production';
 
-  const validUrl = url.startsWith('http://') || url.startsWith('https://')
-    ? url
-    : 'https://placeholder.supabase.co';
+  const isInvalidConfig =
+    !rawUrl ||
+    !rawKey ||
+    rawUrl.includes('placeholder') ||
+    rawKey.includes('placeholder') ||
+    (!rawUrl.startsWith('http://') && !rawUrl.startsWith('https://'));
 
-  // If running with placeholder credentials, bypass redirect in dev
-  if (validUrl.includes('placeholder')) {
+  // Fail-closed di production jika konfigurasi Supabase tidak valid
+  if (isInvalidConfig) {
+    if (isProd) {
+      console.error('[Middleware] Supabase environment variables are missing or invalid in production.');
+      const redirectUrl = request.nextUrl.clone();
+      redirectUrl.pathname = '/login';
+      return NextResponse.redirect(redirectUrl);
+    }
+    // Hanya boleh bypass saat development lokal tanpa env
     return supabaseResponse;
   }
 
-  const supabase = createServerClient(validUrl, key, {
+  const supabase = createServerClient(rawUrl, rawKey, {
     cookies: {
       getAll() {
         return request.cookies.getAll();
@@ -33,24 +45,40 @@ export async function updateSession(request: NextRequest) {
     },
   });
 
+  const pathname = request.nextUrl.pathname;
+  const isCallback = pathname.startsWith('/auth/');
+  const isAuthPage =
+    pathname === '/login' ||
+    pathname === '/daftar' ||
+    pathname === '/lupa-password';
+  const isResetPasswordPage = pathname === '/ganti-password';
+  const isPendingPage = pathname === '/menunggu-persetujuan';
+
+  // Bug 1 fix: Biarkan rute callback OAuth diproses oleh route handler tanpa interferensi
+  if (isCallback) {
+    return supabaseResponse;
+  }
+
   const {
     data: { user },
   } = await supabase.auth.getUser();
-
-  const pathname = request.nextUrl.pathname;
-  const isAuthPage = pathname === '/login' || pathname === '/daftar';
-  const isPendingPage = pathname === '/menunggu-persetujuan';
 
   // 1. User not logged in
   if (!user) {
     if (!isAuthPage) {
       const redirectUrl = request.nextUrl.clone();
       redirectUrl.pathname = '/login';
-      if (pathname !== '/') {
-        redirectUrl.searchParams.set('next', pathname);
+      const safeNext = getSafeRedirectPath(pathname, '/');
+      if (safeNext !== '/') {
+        redirectUrl.searchParams.set('next', safeNext);
       }
       return NextResponse.redirect(redirectUrl);
     }
+    return supabaseResponse;
+  }
+
+  // Khusus halaman /ganti-password: user harus sudah login (misalnya lewat tautan reset email)
+  if (isResetPasswordPage) {
     return supabaseResponse;
   }
 
@@ -61,17 +89,25 @@ export async function updateSession(request: NextRequest) {
     .eq('id', user.id)
     .maybeSingle();
 
-  // If profile does not exist yet or status is pending
   const status = profile?.status || 'pending';
   const role = profile?.role || 'user';
 
+  // Bug 2 fix: Tangani status rejected tanpa redirect loop
   if (status === 'rejected') {
+    // Jalankan signOut agar sesi akun rejected tidak bertahan
+    await supabase.auth.signOut();
+
+    if (isAuthPage) {
+      return supabaseResponse;
+    }
+
     const redirectUrl = request.nextUrl.clone();
     redirectUrl.pathname = '/login';
     redirectUrl.searchParams.set('error', 'rejected');
     return NextResponse.redirect(redirectUrl);
   }
 
+  // 3. User berstatus pending
   if (status === 'pending') {
     if (!isPendingPage) {
       const redirectUrl = request.nextUrl.clone();
@@ -81,23 +117,23 @@ export async function updateSession(request: NextRequest) {
     return supabaseResponse;
   }
 
-  // Approved user
+  // 4. Approved user
   if (status === 'approved') {
-    // If trying to access auth pages or pending page
+    // Cegah user yang sudah login dan approved mengakses halaman auth / pending
     if (isAuthPage || isPendingPage) {
       const redirectUrl = request.nextUrl.clone();
       redirectUrl.pathname = role === 'admin' ? '/admin' : '/';
       return NextResponse.redirect(redirectUrl);
     }
 
-    // Role check for /admin routes
+    // Role check untuk rute /admin
     if (pathname.startsWith('/admin') && role !== 'admin') {
       const redirectUrl = request.nextUrl.clone();
-      redirectUrl.pathname = '/';
+      redirectUrl.pathname = role === 'admin' ? '/admin' : '/';
       return NextResponse.redirect(redirectUrl);
     }
 
-    // Redirect legacy /pengaturan to /admin/pengaturan or /
+    // Redirect legacy /pengaturan
     if (pathname === '/pengaturan') {
       const redirectUrl = request.nextUrl.clone();
       redirectUrl.pathname = role === 'admin' ? '/admin/pengaturan' : '/';

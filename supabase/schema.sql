@@ -82,7 +82,7 @@ CREATE TABLE IF NOT EXISTS public.kos_rules (
 -- 8. TABEL profiles
 CREATE TABLE IF NOT EXISTS public.profiles (
   id          UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
-  member_id   UUID UNIQUE REFERENCES public.members(id) ON DELETE SET NULL,
+  member_id   UUID REFERENCES public.members(id) ON DELETE SET NULL,
   full_name   TEXT NOT NULL,
   email       TEXT NOT NULL,
   role        TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin')),
@@ -91,6 +91,11 @@ CREATE TABLE IF NOT EXISTS public.profiles (
   approved_at TIMESTAMPTZ,
   created_at  TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Partial unique index agar slot akun rejected bisa diklaim ulang
+CREATE UNIQUE INDEX IF NOT EXISTS profiles_member_active_uniq 
+ON public.profiles(member_id) 
+WHERE member_id IS NOT NULL AND status IN ('pending', 'approved');
 
 CREATE INDEX IF NOT EXISTS profiles_member_idx ON public.profiles(member_id);
 CREATE INDEX IF NOT EXISTS profiles_role_idx ON public.profiles(role);
@@ -233,23 +238,27 @@ BEGIN
     v_member_id := NULL;
   END IF;
 
-  INSERT INTO public.profiles (
-    id,
-    member_id,
-    full_name,
-    email,
-    role,
-    status,
-    created_at
-  ) VALUES (
-    NEW.id,
-    v_member_id,
-    v_full_name,
-    NEW.email,
-    'user',
-    'pending',
-    NOW()
-  );
+  BEGIN
+    INSERT INTO public.profiles (
+      id,
+      member_id,
+      full_name,
+      email,
+      role,
+      status,
+      created_at
+    ) VALUES (
+      NEW.id,
+      v_member_id,
+      v_full_name,
+      NEW.email,
+      'user',
+      'pending',
+      NOW()
+    );
+  EXCEPTION WHEN unique_violation THEN
+    RAISE EXCEPTION 'Slot anggota ini sudah diklaim oleh akun lain';
+  END;
 
   RETURN NEW;
 END;
@@ -466,9 +475,6 @@ CREATE POLICY "members_select" ON public.members
   USING (public.is_approved());
 
 DROP POLICY IF EXISTS "members_anon_read" ON public.members;
-CREATE POLICY "members_anon_read" ON public.members
-  FOR SELECT TO anon
-  USING (true);
 
 DROP POLICY IF EXISTS "members_admin_all" ON public.members;
 CREATE POLICY "members_admin_all" ON public.members

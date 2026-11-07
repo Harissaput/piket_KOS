@@ -2,14 +2,16 @@ import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
+import { getSafeRedirectPath } from '@/lib/utils/safeRedirect';
 
 export async function GET(request: NextRequest) {
   const { searchParams, origin } = new URL(request.url);
   const code = searchParams.get('code');
-  const next = searchParams.get('next') ?? '/';
+  const rawNext = searchParams.get('next');
+  const safeNext = getSafeRedirectPath(rawNext, '/');
 
   if (code) {
-    const cookieStore = cookies();
+    const cookieStore = await cookies();
     const supabase = createServerClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
@@ -19,9 +21,13 @@ export async function GET(request: NextRequest) {
             return cookieStore.getAll();
           },
           setAll(cookiesToSet) {
-            cookiesToSet.forEach(({ name, value, options }) =>
-              cookieStore.set(name, value, options)
-            );
+            try {
+              cookiesToSet.forEach(({ name, value, options }) =>
+                cookieStore.set(name, value, options)
+              );
+            } catch {
+              // Safe in route handler
+            }
           },
         },
       }
@@ -40,18 +46,21 @@ export async function GET(request: NextRequest) {
           .maybeSingle();
 
         if (!profile || profile.status === 'pending') {
-          return NextResponse.redirect(`${origin}/menunggu-persetujuan`);
+          return NextResponse.redirect(new URL('/menunggu-persetujuan', origin));
         }
         if (profile.status === 'rejected') {
-          return NextResponse.redirect(`${origin}/login?error=rejected`);
+          return NextResponse.redirect(new URL('/login?error=rejected', origin));
         }
         if (profile.role === 'admin') {
-          return NextResponse.redirect(`${origin}/admin`);
+          // Jika admin memiliki safeNext custom selain '/', ikuti safeNext, jika tidak arahkan ke /admin
+          const target = safeNext !== '/' ? safeNext : '/admin';
+          return NextResponse.redirect(new URL(target, origin));
         }
       }
-      return NextResponse.redirect(`${origin}${next}`);
+
+      return NextResponse.redirect(new URL(safeNext, origin));
     }
   }
 
-  return NextResponse.redirect(`${origin}/login?error=oauth`);
+  return NextResponse.redirect(new URL('/login?error=oauth', origin));
 }

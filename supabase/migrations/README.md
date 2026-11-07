@@ -19,6 +19,11 @@ Dokumen ini menjelaskan urutan migrasi SQL untuk KosPiket di Supabase SQL Editor
    - Membuat RPC transaksi atomik `create_swap_request` dan `respond_swap_request`.
    - Menghapus policy `public_all` dan menerapkan Row Level Security (RLS) ketat sesuai peran (User vs Admin).
 
+3. **`002_auth_fixes.sql`**
+   - Menghapus constraint UNIQUE penuh pada `profiles.member_id` dan menggantinya dengan Partial Unique Index (`WHERE status IN ('pending', 'approved')`) agar slot anggota milik akun berstatus `rejected` dapat diklaim kembali oleh akun lain.
+   - Memperbarui trigger `handle_new_user()` untuk menangkap `unique_violation` jika ada race condition pendaftaran slot yang sama.
+   - Menghapus policy RLS `members_anon_read` pada tabel `members` agar anonim hanya dapat mengambil daftar slot yang tersedia melalui RPC `get_unclaimed_members()`.
+
 ---
 
 ## Langkah Membuat Admin Pertama
