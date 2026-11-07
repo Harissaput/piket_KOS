@@ -1,84 +1,169 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import TopBar from '@/components/layout/TopBar';
-import { ArrowLeftRight, Check, X, Clock, AlertCircle } from 'lucide-react';
+import { ArrowLeftRight, Check, X, Clock, AlertCircle, Ban, Sparkles, RefreshCw, CheckCircle2 } from 'lucide-react';
 import { useMembers } from '@/hooks/useMembers';
 import { useSettings } from '@/hooks/useSettings';
 import { useSwapRequests } from '@/hooks/useSwapRequests';
 import { useAuth } from '@/context/AuthContext';
+import { createClient } from '@/lib/supabase/client';
+import { ScheduleEpoch, ScheduleOverride } from '@/types/database';
+import { getDutyMemberForDateWithEpochs } from '@/lib/algorithms/scheduleRotation';
 import { formatLocalDate } from '@/lib/utils/date';
-import { addDays, parseISO, isBefore, startOfDay } from 'date-fns';
+import { addDays, parseISO, format } from 'date-fns';
+import { id as localeId } from 'date-fns/locale';
 
 export default function TukarJadwalPage() {
   const { member: loggedInMember, role } = useAuth();
   const { members } = useMembers();
-  const { hariLibur } = useSettings();
+  const { startDate, hariLibur } = useSettings();
 
   const {
     allRequests,
     handleCreateRequest,
     handleApprove,
     handleReject,
+    handleCancel,
     isLoading: loadingRequests,
+    refetch,
   } = useSwapRequests();
 
-  // Dynamic default dates based on today
-  const today = new Date();
-  const defaultRequesterDate = formatLocalDate(addDays(today, 1));
-  const defaultTargetDate = formatLocalDate(addDays(today, 2));
+  const [activeTab, setActiveTab] = useState<'masuk' | 'terkirim' | 'riwayat'>('masuk');
 
-  // Available target members = other active members
-  const availableTargetMembers = members.filter(
-    (m) => m.status_aktif && m.id !== loggedInMember?.id
-  );
-
+  // Form states
   const [targetMemberId, setTargetMemberId] = useState('');
-  const [requesterDate, setRequesterDate] = useState(defaultRequesterDate);
-  const [targetDate, setTargetDate] = useState(defaultTargetDate);
-  const [successMsg, setSuccessMsg] = useState(false);
+  const [requesterDate, setRequesterDate] = useState('');
+  const [targetDate, setTargetDate] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const [errorMsg, setErrorMsg] = useState('');
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [processingId, setProcessingId] = useState<string | null>(null);
 
-  // Set default target member once members load
+  // Epochs & Overrides for schedule calculation
+  const [epochs, setEpochs] = useState<ScheduleEpoch[]>([]);
+  const [overrides, setOverrides] = useState<ScheduleOverride[]>([]);
+  const [loadingScheduleContext, setLoadingScheduleContext] = useState(true);
+
+  const supabase = createClient();
+
+  const fetchScheduleContext = useCallback(async () => {
+    try {
+      const [epochsRes, overridesRes] = await Promise.all([
+        supabase.from('schedule_epochs').select('*').order('effective_from', { ascending: true }),
+        supabase.from('schedule_overrides').select('*'),
+      ]);
+      setEpochs((epochsRes.data as ScheduleEpoch[]) || []);
+      setOverrides((overridesRes.data as ScheduleOverride[]) || []);
+    } catch (err) {
+      console.warn('Gagal memuat konteks jadwal:', err);
+    } finally {
+      setLoadingScheduleContext(false);
+    }
+  }, [supabase]);
+
+  useEffect(() => {
+    fetchScheduleContext();
+  }, [fetchScheduleContext]);
+
+  // Anggota tujuan yang tersedia (semua anggota aktif selain diri sendiri)
+  const availableTargetMembers = useMemo(() => {
+    return members.filter((m) => m.status_aktif && m.id !== loggedInMember?.id);
+  }, [members, loggedInMember]);
+
+  // Set default target member
   useEffect(() => {
     if (availableTargetMembers.length > 0 && !targetMemberId) {
       setTargetMemberId(availableTargetMembers[0].id);
     }
   }, [availableTargetMembers, targetMemberId]);
 
+  // Hitung jadwal mendatang (30 hari ke depan) untuk anggota tertentu
+  const getUpcomingScheduleForMember = useCallback(
+    (memberId: string) => {
+      if (!memberId || members.length === 0) return [];
+
+      const today = new Date();
+      const overrideMap = new Map(overrides.map((o) => [o.date, o]));
+      const effectiveStart = startDate || '2026-08-31';
+
+      const upcoming: { dateStr: string; label: string }[] = [];
+
+      // Telusuri 35 hari ke depan
+      for (let i = 1; i <= 35; i++) {
+        const d = addDays(today, i);
+        if (hariLibur === 'Minggu' && d.getDay() === 0) continue;
+
+        const dateStr = formatLocalDate(d);
+
+        // Jika sudah ada override di tanggal ini, cek apakah new_member_id milik anggota ini
+        const ov = overrideMap.get(dateStr);
+        let effectiveId: string | null = null;
+
+        if (ov) {
+          effectiveId = ov.new_member_id;
+        } else {
+          const duty = getDutyMemberForDateWithEpochs(d, members, epochs, effectiveStart, hariLibur);
+          effectiveId = duty?.id || null;
+        }
+
+        if (effectiveId === memberId) {
+          const label = format(d, 'EEEE, d MMMM yyyy', { locale: localeId });
+          upcoming.push({ dateStr, label });
+        }
+      }
+
+      return upcoming;
+    },
+    [members, epochs, overrides, startDate, hariLibur]
+  );
+
+  // Pilihan tanggal mendatang pengaju
+  const requesterUpcomingDates = useMemo(() => {
+    if (!loggedInMember) return [];
+    return getUpcomingScheduleForMember(loggedInMember.id);
+  }, [loggedInMember, getUpcomingScheduleForMember]);
+
+  // Pilihan tanggal mendatang target
+  const targetUpcomingDates = useMemo(() => {
+    if (!targetMemberId) return [];
+    return getUpcomingScheduleForMember(targetMemberId);
+  }, [targetMemberId, getUpcomingScheduleForMember]);
+
+  // Set default dates
+  useEffect(() => {
+    if (requesterUpcomingDates.length > 0 && !requesterDate) {
+      setRequesterDate(requesterUpcomingDates[0].dateStr);
+    }
+  }, [requesterUpcomingDates, requesterDate]);
+
+  useEffect(() => {
+    if (targetUpcomingDates.length > 0 && !targetDate) {
+      setTargetDate(targetUpcomingDates[0].dateStr);
+    }
+  }, [targetUpcomingDates, targetDate]);
+
+  const showFeedback = (type: 'success' | 'error', text: string) => {
+    setFeedback({ type, text });
+    setTimeout(() => setFeedback(null), 6000);
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setErrorMsg('');
-
     if (!loggedInMember) {
-      setErrorMsg('Akun Anda belum terhubung dengan slot anggota piket.');
+      showFeedback('error', 'Akun Anda belum terhubung dengan slot anggota piket.');
       return;
     }
-
     if (!targetMemberId) {
-      setErrorMsg('Silakan pilih anggota tujuan tukar.');
+      showFeedback('error', 'Silakan pilih anggota tujuan tukar.');
       return;
     }
-
+    if (!requesterDate || !targetDate) {
+      showFeedback('error', 'Silakan pilih kedua tanggal piket yang akan ditukar.');
+      return;
+    }
     if (requesterDate === targetDate) {
-      setErrorMsg('Tanggal piket yang ditukar tidak boleh sama.');
+      showFeedback('error', 'Tanggal piket yang ditukar tidak boleh sama.');
       return;
-    }
-
-    const todayStart = startOfDay(new Date());
-    if (isBefore(parseISO(requesterDate), todayStart) || isBefore(parseISO(targetDate), todayStart)) {
-      setErrorMsg('Tanggal piket tidak boleh di masa lalu.');
-      return;
-    }
-
-    // Check holiday (Minggu)
-    if (hariLibur === 'Minggu') {
-      if (parseISO(requesterDate).getDay() === 0 || parseISO(targetDate).getDay() === 0) {
-        setErrorMsg('Tidak dapat menukar pada hari libur (Minggu).');
-        return;
-      }
     }
 
     setSubmitting(true);
@@ -88,266 +173,408 @@ export default function TukarJadwalPage() {
         dateRequester: requesterDate,
         dateTarget: targetDate,
       });
-      setSuccessMsg(true);
-      setTimeout(() => setSuccessMsg(false), 4000);
+
+      showFeedback('success', 'Permintaan tukar jadwal berhasil diajukan dan menunggu persetujuan!');
+      await fetchScheduleContext();
     } catch (err: any) {
       console.error(err);
-      setErrorMsg(err.message || 'Gagal mengirim permintaan tukar jadwal.');
+      showFeedback('error', err.message || 'Gagal mengajukan tukar jadwal.');
     } finally {
       setSubmitting(false);
     }
   };
 
-  const onApprove = async (id: string) => {
+  const handleApproveAction = async (id: string) => {
     setProcessingId(id);
-    setErrorMsg('');
     try {
       await handleApprove(id);
+      showFeedback('success', 'Permintaan tukar jadwal disetujui! Jadwal otomatis diperbarui.');
+      await fetchScheduleContext();
     } catch (err: any) {
-      console.error('Error approving swap:', err);
-      setErrorMsg(err.message || 'Gagal menyetujui permintaan tukar.');
+      showFeedback('error', err.message || 'Gagal menyetujui permintaan.');
     } finally {
       setProcessingId(null);
     }
   };
 
-  const onReject = async (id: string) => {
+  const handleRejectAction = async (id: string) => {
     setProcessingId(id);
-    setErrorMsg('');
     try {
       await handleReject(id);
+      showFeedback('success', 'Permintaan tukar jadwal ditolak.');
+      await fetchScheduleContext();
     } catch (err: any) {
-      console.error('Error rejecting swap:', err);
-      setErrorMsg(err.message || 'Gagal menolak permintaan tukar.');
+      showFeedback('error', err.message || 'Gagal menolak permintaan.');
     } finally {
       setProcessingId(null);
     }
   };
+
+  const handleCancelAction = async (id: string) => {
+    setProcessingId(id);
+    try {
+      await handleCancel(id);
+      showFeedback('success', 'Permintaan tukar berhasil dibatalkan.');
+      await fetchScheduleContext();
+    } catch (err: any) {
+      showFeedback('error', err.message || 'Gagal membatalkan permintaan.');
+    } finally {
+      setProcessingId(null);
+    }
+  };
+
+  // Tab filtering
+  const masukRequests = useMemo(() => {
+    return allRequests.filter(
+      (r) => r.status === 'pending' && (role === 'admin' || r.target_member_id === loggedInMember?.id)
+    );
+  }, [allRequests, loggedInMember, role]);
+
+  const terkirimRequests = useMemo(() => {
+    return allRequests.filter(
+      (r) => r.status === 'pending' && (role === 'admin' || r.requester_id === loggedInMember?.id)
+    );
+  }, [allRequests, loggedInMember, role]);
+
+  const riwayatRequests = useMemo(() => {
+    return allRequests.filter((r) => r.status !== 'pending');
+  }, [allRequests]);
+
+  const targetMemberObj = members.find((m) => m.id === targetMemberId);
 
   return (
     <div className="space-y-6">
       <TopBar title="Tukar Jadwal Piket" />
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Swap Form */}
-        <div className="lg:col-span-7 bg-white rounded-3xl p-6 shadow-sm border border-gray-100 space-y-6">
-          <div className="flex items-center gap-3 pb-4 border-b border-gray-100">
-            <div className="p-3 bg-amber-50 text-amber-600 rounded-2xl">
-              <ArrowLeftRight className="w-6 h-6" />
-            </div>
-            <div>
-              <h2 className="text-lg font-bold text-gray-900">Form Permintaan Tukar</h2>
-              <p className="text-xs text-gray-500 font-medium">
-                Pilih tanggal piket Anda dan ajukan tukar ke anggota lain
-              </p>
-            </div>
+      {/* Form Buat Permintaan Tukar */}
+      <div className="bg-white rounded-3xl p-6 sm:p-8 border border-gray-100 shadow-sm space-y-6">
+        <div>
+          <h2 className="text-xl font-extrabold text-gray-900">Ajukan Penukaran Jadwal</h2>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Tukar jadwal piket Anda dengan anggota lain tanpa merusak rotasi hari berikutnya.
+          </p>
+        </div>
+
+        {feedback && (
+          <div
+            className={`p-4 rounded-2xl text-xs sm:text-sm font-semibold flex items-start gap-3 ${
+              feedback.type === 'success'
+                ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                : 'bg-rose-50 text-rose-800 border border-rose-200'
+            }`}
+          >
+            {feedback.type === 'success' ? (
+              <CheckCircle2 className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+            ) : (
+              <AlertCircle className="w-5 h-5 text-rose-600 flex-shrink-0 mt-0.5" />
+            )}
+            <span>{feedback.text}</span>
           </div>
+        )}
 
-          {successMsg && (
-            <div className="p-4 bg-emerald-50 text-emerald-800 text-xs sm:text-sm font-semibold rounded-2xl flex items-center gap-2 border border-emerald-200">
-              <Check className="w-5 h-5 text-emerald-600 flex-shrink-0" />
-              <span>Permintaan tukar jadwal berhasil dikirim! Menunggu konfirmasi.</span>
-            </div>
-          )}
-
-          {errorMsg && (
-            <div className="p-4 bg-rose-50 text-rose-800 text-xs sm:text-sm font-semibold rounded-2xl flex items-center gap-2 border border-rose-200">
-              <AlertCircle className="w-5 h-5 text-rose-600 flex-shrink-0" />
-              <span>{errorMsg}</span>
-            </div>
-          )}
-
-          <form onSubmit={handleSubmit} className="space-y-5">
-            {/* Logged in Requester Info */}
+        <form onSubmit={handleSubmit} className="space-y-5">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+            {/* Pengaju Otomatis */}
             <div>
-              <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-2">
+              <label className="block text-xs font-bold uppercase tracking-wider text-gray-700 mb-2">
                 Pengaju (Akun Anda)
               </label>
               <div className="p-3 bg-gray-50 rounded-2xl border border-gray-200 flex items-center gap-3">
-                <div className="w-8 h-8 rounded-full overflow-hidden border border-gray-200 bg-white">
-                  <img
-                    src={
-                      loggedInMember?.avatar_url ||
-                      `https://api.dicebear.com/7.x/avataaars/svg?seed=${loggedInMember?.name || 'A'}`
-                    }
-                    alt={loggedInMember?.name || 'User'}
-                    className="w-full h-full object-cover"
-                  />
+                <div
+                  className="w-8 h-8 rounded-full overflow-hidden flex items-center justify-center font-bold text-white text-xs"
+                  style={{ backgroundColor: loggedInMember?.avatar_color || '#a855f7' }}
+                >
+                  {loggedInMember?.avatar_url ? (
+                    <img src={loggedInMember.avatar_url} alt="" className="w-full h-full object-cover" />
+                  ) : (
+                    loggedInMember?.name?.charAt(0) || 'U'
+                  )}
                 </div>
-                <div>
-                  <p className="text-xs font-bold text-gray-900">
-                    {loggedInMember?.name || 'Tidak ada anggota tertaut'}
+                <div className="min-w-0">
+                  <p className="text-xs font-bold text-gray-900 truncate">
+                    {loggedInMember?.name || 'Belum Terhubung'}
                   </p>
-                  <p className="text-[10px] text-gray-500">Otomatis terhubung dari sesi login Anda</p>
+                  <p className="text-[10px] text-gray-500 truncate">Anggota Terjadwal</p>
                 </div>
               </div>
             </div>
 
-            {/* Tanggal Pengaju */}
+            {/* Pilih Anggota Tujuan */}
             <div>
-              <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-2">
-                1. Tanggal Piket Anda yang Ingin Ditukar
+              <label className="block text-xs font-bold uppercase tracking-wider text-gray-700 mb-2">
+                Tukar Dengan Anggota
               </label>
-              <input
-                type="date"
-                required
-                value={requesterDate}
-                onChange={(e) => setRequesterDate(e.target.value)}
-                className="w-full px-4 py-3 bg-gray-50 rounded-2xl border border-gray-200 text-xs sm:text-sm font-semibold text-gray-900 focus:outline-none focus:ring-2 focus:ring-black/10 focus:bg-white"
-              />
+              <select
+                value={targetMemberId}
+                onChange={(e) => setTargetMemberId(e.target.value)}
+                className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-2xl text-xs font-bold text-gray-900 focus:outline-none focus:bg-white focus:border-black transition-all"
+              >
+                {availableTargetMembers.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                  </option>
+                ))}
+              </select>
             </div>
 
-            {/* Anggota Tujuan */}
+            {/* Tanggal Jadwal Pengaju */}
             <div>
-              <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-2">
-                2. Pilih Anggota Tujuan Tukar
+              <label className="block text-xs font-bold uppercase tracking-wider text-gray-700 mb-2">
+                Jadwal Piket Anda
               </label>
-              {availableTargetMembers.length === 0 ? (
-                <p className="text-xs text-gray-400 italic">Tidak ada anggota lain yang aktif.</p>
+              {requesterUpcomingDates.length === 0 ? (
+                <div className="p-3 bg-gray-50 rounded-2xl text-xs text-gray-400 font-medium">
+                  Tidak ada jadwal mendatang Anda
+                </div>
               ) : (
                 <select
-                  value={targetMemberId}
-                  onChange={(e) => setTargetMemberId(e.target.value)}
-                  className="w-full px-4 py-3 bg-gray-50 rounded-2xl border border-gray-200 text-xs sm:text-sm font-semibold text-gray-900 focus:outline-none focus:ring-2 focus:ring-black/10 focus:bg-white"
+                  value={requesterDate}
+                  onChange={(e) => setRequesterDate(e.target.value)}
+                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-2xl text-xs font-bold text-gray-900 focus:outline-none focus:bg-white focus:border-black transition-all"
                 >
-                  {availableTargetMembers.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.name}
+                  {requesterUpcomingDates.map((d) => (
+                    <option key={d.dateStr} value={d.dateStr}>
+                      {d.label}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+          </div>
+
+          {/* Tanggal Anggota Tujuan & Pratinjau Dampak */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-5 pt-2">
+            <div>
+              <label className="block text-xs font-bold uppercase tracking-wider text-gray-700 mb-2">
+                Jadwal Piket Anggota Tujuan ({targetMemberObj?.name || 'Tujuan'})
+              </label>
+              {targetUpcomingDates.length === 0 ? (
+                <div className="p-3 bg-gray-50 rounded-2xl text-xs text-gray-400 font-medium">
+                  Tidak ada jadwal mendatang anggota tujuan
+                </div>
+              ) : (
+                <select
+                  value={targetDate}
+                  onChange={(e) => setTargetDate(e.target.value)}
+                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-2xl text-xs font-bold text-gray-900 focus:outline-none focus:bg-white focus:border-black transition-all"
+                >
+                  {targetUpcomingDates.map((d) => (
+                    <option key={d.dateStr} value={d.dateStr}>
+                      {d.label}
                     </option>
                   ))}
                 </select>
               )}
             </div>
 
-            {/* Tanggal Target */}
-            <div>
-              <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-2">
-                3. Tanggal Piket Pengganti (Milik Teman)
-              </label>
-              <input
-                type="date"
-                required
-                value={targetDate}
-                onChange={(e) => setTargetDate(e.target.value)}
-                className="w-full px-4 py-3 bg-gray-50 rounded-2xl border border-gray-200 text-xs sm:text-sm font-semibold text-gray-900 focus:outline-none focus:ring-2 focus:ring-black/10 focus:bg-white"
-              />
-            </div>
-
-            <button
-              type="submit"
-              disabled={submitting || !loggedInMember}
-              className="w-full py-4 px-6 bg-black hover:bg-gray-800 text-white rounded-full font-bold text-xs sm:text-sm shadow-md transition-all disabled:opacity-50 flex items-center justify-center gap-2"
-            >
-              {submitting ? (
-                <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-              ) : (
-                <>
-                  <ArrowLeftRight className="w-4 h-4" />
-                  <span>Kirim Permintaan Tukar</span>
-                </>
-              )}
-            </button>
-          </form>
-        </div>
-
-        {/* Swap Request List */}
-        <div className="lg:col-span-5 bg-white rounded-3xl p-6 shadow-sm border border-gray-100 space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-bold text-gray-900">Status Permintaan Tukar</h2>
-            <span className="text-xs font-bold text-gray-400">{allRequests.length} total</span>
+            {/* Pratinjau Sebelum -> Sesudah */}
+            {requesterDate && targetDate && (
+              <div className="p-4 bg-purple-50/70 border border-purple-100 rounded-2xl space-y-2">
+                <span className="text-[11px] font-bold text-purple-900 uppercase tracking-wider block flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-purple-600" />
+                  Pratinjau Pertukaran:
+                </span>
+                <div className="text-xs space-y-1 text-gray-800">
+                  <p>
+                    • Tanggal <strong>{requesterDate}</strong>: Semula{' '}
+                    <span className="line-through text-gray-400">{loggedInMember?.name}</span> ➔ menjadi{' '}
+                    <strong className="text-purple-700">{targetMemberObj?.name}</strong>
+                  </p>
+                  <p>
+                    • Tanggal <strong>{targetDate}</strong>: Semula{' '}
+                    <span className="line-through text-gray-400">{targetMemberObj?.name}</span> ➔ menjadi{' '}
+                    <strong className="text-purple-700">{loggedInMember?.name}</strong>
+                  </p>
+                </div>
+              </div>
+            )}
           </div>
 
+          <div className="flex justify-end pt-3 border-t border-gray-100">
+            <button
+              type="submit"
+              disabled={submitting || !loggedInMember || !requesterDate || !targetDate}
+              className="px-6 py-3 bg-[#141416] hover:bg-black text-white text-xs font-bold rounded-full shadow-md transition-all flex items-center gap-2 disabled:opacity-50"
+            >
+              <ArrowLeftRight className="w-4 h-4 text-purple-400" />
+              <span>{submitting ? 'Mengirim...' : 'Kirim Permintaan Tukar'}</span>
+            </button>
+          </div>
+        </form>
+      </div>
+
+      {/* Tabs Menu Permintaan */}
+      <div className="bg-white rounded-3xl border border-gray-100 shadow-sm overflow-hidden">
+        <div className="flex border-b border-gray-100 text-xs font-bold">
+          <button
+            onClick={() => setActiveTab('masuk')}
+            className={`flex-1 py-4 text-center transition-all flex items-center justify-center gap-2 ${
+              activeTab === 'masuk'
+                ? 'text-purple-700 border-b-2 border-purple-600 bg-purple-50/20'
+                : 'text-gray-500 hover:text-gray-900'
+            }`}
+          >
+            <span>Permintaan Masuk</span>
+            {masukRequests.length > 0 && (
+              <span className="px-2 py-0.5 text-[10px] rounded-full bg-purple-600 text-white">
+                {masukRequests.length}
+              </span>
+            )}
+          </button>
+
+          <button
+            onClick={() => setActiveTab('terkirim')}
+            className={`flex-1 py-4 text-center transition-all flex items-center justify-center gap-2 ${
+              activeTab === 'terkirim'
+                ? 'text-purple-700 border-b-2 border-purple-600 bg-purple-50/20'
+                : 'text-gray-500 hover:text-gray-900'
+            }`}
+          >
+            <span>Permintaan Terkirim</span>
+            {terkirimRequests.length > 0 && (
+              <span className="px-2 py-0.5 text-[10px] rounded-full bg-gray-800 text-white">
+                {terkirimRequests.length}
+              </span>
+            )}
+          </button>
+
+          <button
+            onClick={() => setActiveTab('riwayat')}
+            className={`flex-1 py-4 text-center transition-all ${
+              activeTab === 'riwayat'
+                ? 'text-purple-700 border-b-2 border-purple-600 bg-purple-50/20'
+                : 'text-gray-500 hover:text-gray-900'
+            }`}
+          >
+            <span>Riwayat Tukar ({riwayatRequests.length})</span>
+          </button>
+        </div>
+
+        {/* Content list */}
+        <div className="p-6">
           {loadingRequests ? (
-            <div className="py-12 text-center text-xs font-bold text-gray-400">
-              Memuat permintaan...
+            <div className="p-12 text-center text-xs font-bold text-gray-400">
+              <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-2 text-purple-600" />
+              Memuat data pertukaran...
             </div>
-          ) : allRequests.length === 0 ? (
-            <div className="p-8 text-center bg-gray-50 rounded-2xl border border-dashed border-gray-200">
-              <Clock className="w-8 h-8 text-gray-400 mx-auto mb-2" />
-              <p className="text-xs font-bold text-gray-500">Belum ada permintaan tukar jadwal</p>
-              <p className="text-[11px] text-gray-400 mt-1">
-                Gunakan form di samping untuk membuat permintaan tukar baru.
-              </p>
-            </div>
-          ) : (
-            <div className="space-y-3 max-h-[500px] overflow-y-auto pr-1">
-              {allRequests.map((req) => {
-                const isPending = req.status === 'pending';
-                const isApproved = req.status === 'approved';
-                const isRejected = req.status === 'rejected';
-                const isBusy = processingId === req.id;
-
-                // Authorization: only target member or admin can approve/reject
-                const canRespond =
-                  isPending &&
-                  loggedInMember &&
-                  (req.target_member_id === loggedInMember.id || role === 'admin');
-                const isRequester = loggedInMember && req.requester_id === loggedInMember.id;
-
-                return (
+          ) : activeTab === 'masuk' ? (
+            masukRequests.length === 0 ? (
+              <div className="p-12 text-center text-xs font-bold text-gray-400">
+                Tidak ada permintaan tukar jadwal yang menunggu konfirmasi Anda.
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {masukRequests.map((req) => (
                   <div
                     key={req.id}
-                    className={`p-4 rounded-2xl border space-y-3 transition-all ${
-                      isPending
-                        ? 'bg-amber-50/70 border-amber-200'
-                        : isApproved
-                        ? 'bg-emerald-50/60 border-emerald-200'
-                        : 'bg-rose-50/60 border-rose-200'
-                    }`}
+                    className="p-5 rounded-2xl border border-gray-100 bg-gray-50/60 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
                   >
-                    <div className="flex items-center justify-between">
-                      <span
-                        className={`text-xs font-bold flex items-center gap-1.5 ${
-                          isPending
-                            ? 'text-amber-800'
-                            : isApproved
-                            ? 'text-emerald-800'
-                            : 'text-rose-800'
-                        }`}
-                      >
-                        {isPending && <Clock className="w-3.5 h-3.5 text-amber-600" />}
-                        {isApproved && <Check className="w-3.5 h-3.5 text-emerald-600" />}
-                        {isRejected && <X className="w-3.5 h-3.5 text-rose-600" />}
-                        {isPending ? 'Menunggu Konfirmasi' : isApproved ? 'Disetujui' : 'Ditolak'}
-                      </span>
-                      <span className="text-[10px] text-gray-400 font-medium">
-                        {req.created_at ? req.created_at.slice(0, 10) : 'Terbaru'}
-                      </span>
+                    <div>
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-xs font-bold text-gray-900">
+                          {req.requester?.name || 'Anggota'}
+                        </span>
+                        <span className="text-[10px] text-gray-400">mengajukan penukaran jadwal:</span>
+                      </div>
+                      <p className="text-xs text-gray-700">
+                        Piket Anda pada <strong>{req.date_target}</strong> ditukar dengan piket miliknya pada{' '}
+                        <strong>{req.date_requester}</strong>.
+                      </p>
                     </div>
 
-                    <p className="text-xs font-semibold text-gray-800 leading-relaxed">
-                      <span className="font-bold text-black">{req.requester?.name || 'Anggota'}</span>{' '}
-                      tukar <span className="font-bold text-black">{req.date_requester}</span> dengan{' '}
-                      <span className="font-bold text-black">{req.target_member?.name || 'Anggota'}</span>{' '}
-                      <span className="font-bold text-black">{req.date_target}</span>.
-                    </p>
-
-                    {/* Action buttons if current user is the target or admin */}
-                    {canRespond ? (
-                      <div className="flex gap-2 pt-2 border-t border-amber-200/50">
-                        <button
-                          onClick={() => onApprove(req.id)}
-                          disabled={isBusy}
-                          className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-full transition-colors flex items-center justify-center gap-1 disabled:opacity-50"
-                        >
-                          <Check className="w-3.5 h-3.5" /> {isBusy ? '...' : 'Setuju'}
-                        </button>
-                        <button
-                          onClick={() => onReject(req.id)}
-                          disabled={isBusy}
-                          className="flex-1 py-2 bg-rose-100 hover:bg-rose-200 text-rose-700 text-xs font-bold rounded-full transition-colors flex items-center justify-center gap-1 disabled:opacity-50"
-                        >
-                          <X className="w-3.5 h-3.5" /> {isBusy ? '...' : 'Tolak'}
-                        </button>
-                      </div>
-                    ) : isPending && isRequester ? (
-                      <p className="text-[11px] text-amber-700 font-medium italic pt-1 border-t border-amber-200/40">
-                        Menunggu tanggapan dari {req.target_member?.name || 'anggota tujuan'}.
-                      </p>
-                    ) : null}
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => handleRejectAction(req.id)}
+                        disabled={processingId === req.id}
+                        className="px-4 py-2 rounded-full text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 transition-all disabled:opacity-50"
+                      >
+                        Tolak
+                      </button>
+                      <button
+                        onClick={() => handleApproveAction(req.id)}
+                        disabled={processingId === req.id}
+                        className="px-5 py-2 rounded-full text-xs font-bold text-white bg-purple-600 hover:bg-purple-700 shadow-sm transition-all disabled:opacity-50"
+                      >
+                        {processingId === req.id ? 'Memproses...' : 'Setujui Tukar'}
+                      </button>
+                    </div>
                   </div>
-                );
-              })}
+                ))}
+              </div>
+            )
+          ) : activeTab === 'terkirim' ? (
+            terkirimRequests.length === 0 ? (
+              <div className="p-12 text-center text-xs font-bold text-gray-400">
+                Anda belum memiliki permintaan tukar yang diajukan.
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {terkirimRequests.map((req) => (
+                  <div
+                    key={req.id}
+                    className="p-5 rounded-2xl border border-gray-100 bg-gray-50/60 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+                  >
+                    <div>
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-xs font-bold text-gray-900">
+                          Kepada: {req.target_member?.name || 'Anggota'}
+                        </span>
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 font-bold uppercase tracking-wider">
+                          Menunggu Persetujuan
+                        </span>
+                      </div>
+                      <p className="text-xs text-gray-700">
+                        Jadwal Anda (<strong>{req.date_requester}</strong>) ➔ Jadwalnya (
+                        <strong>{req.date_target}</strong>)
+                      </p>
+                    </div>
+
+                    <button
+                      onClick={() => handleCancelAction(req.id)}
+                      disabled={processingId === req.id}
+                      className="px-4 py-2 rounded-full text-xs font-bold text-gray-600 bg-white border border-gray-200 hover:bg-gray-100 transition-all disabled:opacity-50"
+                    >
+                      {processingId === req.id ? 'Membatalkan...' : 'Batalkan'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )
+          ) : riwayatRequests.length === 0 ? (
+            <div className="p-12 text-center text-xs font-bold text-gray-400">
+              Belum ada riwayat permintaan tukar jadwal yang diproses.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {riwayatRequests.map((req) => (
+                <div
+                  key={req.id}
+                  className="p-4 rounded-2xl border border-gray-100 bg-white flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+                >
+                  <div>
+                    <p className="font-bold text-gray-900">
+                      {req.requester?.name} ⇄ {req.target_member?.name}
+                    </p>
+                    <p className="text-gray-500 text-[11px]">
+                      Tanggal: {req.date_requester} tukar dengan {req.date_target}
+                    </p>
+                  </div>
+
+                  <span
+                    className={`inline-flex items-center px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider self-start sm:self-auto ${
+                      req.status === 'approved'
+                        ? 'bg-emerald-100 text-emerald-800'
+                        : req.status === 'rejected'
+                        ? 'bg-rose-100 text-rose-800'
+                        : req.status === 'cancelled'
+                        ? 'bg-gray-100 text-gray-600'
+                        : 'bg-amber-100 text-amber-800'
+                    }`}
+                  >
+                    {req.status}
+                  </span>
+                </div>
+              ))}
             </div>
           )}
         </div>

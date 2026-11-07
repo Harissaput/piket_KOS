@@ -1,13 +1,21 @@
 export type MemberStatus = 'belum' | 'selesai' | 'terlewat' | 'izin' | 'ditukar';
-export type SwapStatus = 'pending' | 'approved' | 'rejected';
+export type SwapStatus = 'pending' | 'approved' | 'rejected' | 'cancelled' | 'expired';
 export type OverrideReason = 'swap' | 'izin' | 'manual';
 export type Role = 'user' | 'admin';
 export type ProfileStatus = 'pending' | 'approved' | 'rejected';
 
+export interface ScheduleEpoch {
+  id: string;
+  effective_from: string; // YYYY-MM-DD
+  member_order: string[]; // UUID array
+  created_by?: string | null;
+  created_at: string;
+}
+
 export interface Member {
   id: string;
   name: string;
-  order_index: number; // 0=Haris, 1=Fahrul, 2=Ishom
+  order_index: number;
   avatar_url?: string;
   avatar_color: string;
   status_aktif: boolean;
@@ -92,10 +100,13 @@ export interface SwapRequest {
   date_requester: string; // YYYY-MM-DD
   date_target: string; // YYYY-MM-DD
   status: SwapStatus;
+  responded_at?: string | null;
+  responded_by?: string | null;
   created_at: string;
   // Joined fields
   requester?: Member;
   target_member?: Member;
+  responder?: Profile | null;
 }
 
 export interface DaySchedule {

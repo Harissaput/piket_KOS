@@ -2,23 +2,21 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { Member } from '@/types/database';
-import { getMembers, updateMemberAvatar, updateMemberName } from '@/services/member.service';
+import { getMembers } from '@/services/member.service';
 import { createClient } from '@/lib/supabase/client';
 
-interface UseMembersReturn {
+export interface UseMembersReturn {
   members: Member[];
   isLoading: boolean;
   error: string | null;
   refetch: () => Promise<void>;
-  handleUpdateAvatar: (memberId: string, avatarUrl: string) => Promise<void>;
-  handleUpdateName: (memberId: string, name: string) => Promise<void>;
 }
 
 /**
  * Hook for fetching and managing members.
- * Subscribes to Supabase Realtime so all 3 users see avatar/name changes live.
+ * Subscribes to Realtime for immediate updates.
  */
-export function useMembers(): UseMembersReturn {
+export function useMembers(includeInactive: boolean = false): UseMembersReturn {
   const [members, setMembers] = useState<Member[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -26,28 +24,32 @@ export function useMembers(): UseMembersReturn {
   const fetchMembers = useCallback(async () => {
     try {
       setError(null);
-      const data = await getMembers();
-      setMembers(data);
+      const supabase = createClient();
+      let query = supabase.from('members').select('*').order('order_index', { ascending: true });
+      if (!includeInactive) {
+        query = query.eq('status_aktif', true);
+      }
+      const { data, error: err } = await query;
+      if (err) throw err;
+      setMembers((data as Member[]) || []);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Gagal memuat data anggota');
+      console.warn('[useMembers] Fetch error:', err);
+      setError(err instanceof Error ? err.message : 'Gagal memuat anggota');
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [includeInactive]);
 
   useEffect(() => {
     fetchMembers();
 
-    // Supabase Realtime — update when any member row changes
     const supabase = createClient();
     const channel = supabase
       .channel(`members-realtime-${Math.random().toString(36).substring(7)}`)
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'members' },
-        () => {
-          fetchMembers();
-        }
+        () => fetchMembers()
       )
       .subscribe();
 
@@ -56,36 +58,10 @@ export function useMembers(): UseMembersReturn {
     };
   }, [fetchMembers]);
 
-  const handleUpdateAvatar = async (memberId: string, avatarUrl: string) => {
-    try {
-      const updated = await updateMemberAvatar(memberId, avatarUrl);
-      setMembers((prev) =>
-        prev.map((m) => (m.id === memberId ? updated : m))
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Gagal update avatar');
-      throw err;
-    }
-  };
-
-  const handleUpdateName = async (memberId: string, name: string) => {
-    try {
-      const updated = await updateMemberName(memberId, name);
-      setMembers((prev) =>
-        prev.map((m) => (m.id === memberId ? updated : m))
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Gagal update nama');
-      throw err;
-    }
-  };
-
   return {
     members,
     isLoading,
     error,
     refetch: fetchMembers,
-    handleUpdateAvatar,
-    handleUpdateName,
   };
 }

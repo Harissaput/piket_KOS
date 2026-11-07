@@ -3,27 +3,25 @@
 
 | Atribut | Detail |
 |---|---|
-| Versi | 2.1 |
+| Versi | 2.3 |
 | Status | Final |
 | Platform | Web Responsive |
-| Target Pengguna | Penghuni kost |
-| Jumlah Anggota | 3 orang |
-| Nama Anggota | Haris, Fahrul, Ishom |
-| Frekuensi Piket | 2 kali per orang per minggu |
-| Tanggal Dokumen | 5 September 2026 |
+| Target Pengguna | Penghuni kost & Pengelola/Admin |
+| Jumlah Anggota | Dinamis (Minimal 2 orang, default 3 orang) |
+| Konsep Rotasi | Schedule Epochs (Jadwal masa lalu abadi) |
+| Tanggal Dokumen | 8 November 2026 |
 
 ---
 
 ## 1. Ringkasan Produk
 
-KosPiket adalah aplikasi web untuk mengatur jadwal kebersihan kost secara otomatis.
+KosPiket adalah aplikasi web modern untuk mengelola jadwal kebersihan kost secara otomatis berbasis rotasi adil dan multi-anggota dinamis.
 
-Aplikasi memiliki 3 anggota (Haris, Fahrul, Ishom). Setiap anggota mendapatkan 2 jadwal piket dalam satu minggu, sehingga terdapat:
-
-- 3 anggota × 2 piket = **6 hari piket**
-- 7 hari seminggu − 6 hari piket = **1 hari libur piket** (tidak ada jadwal untuk siapa pun)
-
-Pengguna tidak perlu memilih jadwal sendiri. Sistem menentukan jadwal secara otomatis menggunakan algoritma rotasi yang adil, sehingga setiap anggota mendapat kombinasi hari yang setara dari minggu ke minggu.
+Mulai KosPiket v2.3, sistem mendukung:
+- **Anggota Dinamis**: Admin dapat menambah slot anggota baru atau menonaktifkan anggota tanpa batas angka 3 orang.
+- **Konsep Schedule Epochs**: Setiap perubahan komposisi anggota memiliki tanggal berlaku (`effective_from`). Jadwal dan riwayat piket sebelum tanggal tersebut dijamin **100% tidak berubah**.
+- **Definisi Kedisiplinan Terstandar**: Dihitung dengan rumus `Selesai / (Selesai + Terlewat) * 100`. Status Izin dan Ditukar tidak dianggap sebagai kegagalan/beban kedisiplinan.
+- **Tukar Jadwal Atomik**: Penukaran jadwal diverifikasi terhadap jadwal riil, menolak tanggal masa lalu/hari libur/bentrok, dan otomatis kedaluwarsa (`expired`) jika tanggal telah lewat.
 
 ---
 

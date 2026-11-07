@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 import { useMembers } from '@/hooks/useMembers';
+import { useSwapRequests } from '@/hooks/useSwapRequests';
 
 const USER_MENU_ITEMS = [
   { name: 'Dashboard', href: '/', icon: LayoutGrid },
@@ -27,8 +28,13 @@ export default function Sidebar() {
   const pathname = usePathname();
   const { user, profile, member, role, signOut } = useAuth();
   const { members } = useMembers();
+  const { pendingRequests } = useSwapRequests();
 
   const activeCount = members.filter((m) => m.status_aktif).length;
+  // Hitung permintaan tukar pending yang ditujukan untuk user ini (atau semua jika admin)
+  const incomingPendingCount = pendingRequests.filter(
+    (req) => req.status === 'pending' && (role === 'admin' || req.target_member_id === member?.id)
+  ).length;
 
   return (
     <aside className="w-16 sm:w-64 bg-[#141416] text-white flex flex-col h-screen sticky top-0 px-2 sm:px-4 py-6 z-20 transition-all flex-shrink-0">
@@ -67,6 +73,11 @@ export default function Sidebar() {
                 />
                 <span className="hidden sm:inline truncate">{item.name}</span>
               </div>
+              {item.href === '/tukar-jadwal' && incomingPendingCount > 0 && (
+                <span className="hidden sm:inline-flex items-center justify-center px-2 py-0.5 text-[10px] font-black rounded-full bg-purple-500 text-white">
+                  {incomingPendingCount}
+                </span>
+              )}
             </Link>
           );
         })}

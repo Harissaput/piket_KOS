@@ -6,8 +6,8 @@ import {
   getPendingSwapRequests,
   getAllSwapRequests,
   createSwapRequest,
-  approveSwapRequest,
-  rejectSwapRequest,
+  respondSwapRequest,
+  cancelSwapRequestRpc,
 } from '@/services/swap.service';
 import { createClient } from '@/lib/supabase/client';
 
@@ -51,38 +51,32 @@ export function useSwapRequests() {
     };
   }, [fetchRequests]);
 
-  const handleCreateRequest = async (payload: {
+  const handleCreateRequest = async (params: {
     targetMemberId: string;
     dateRequester: string;
     dateTarget: string;
   }) => {
-    try {
-      await createSwapRequest(payload);
-      await fetchRequests();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Gagal mengirim permintaan tukar');
-      throw err;
-    }
+    const res = await createSwapRequest(params);
+    await fetchRequests();
+    return res;
   };
 
   const handleApprove = async (requestId: string) => {
-    try {
-      await approveSwapRequest(requestId);
-      await fetchRequests();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Gagal menyetujui tukar');
-      throw err;
-    }
+    const res = await respondSwapRequest(requestId, true);
+    await fetchRequests();
+    return res;
   };
 
   const handleReject = async (requestId: string) => {
-    try {
-      await rejectSwapRequest(requestId);
-      await fetchRequests();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Gagal menolak tukar');
-      throw err;
-    }
+    const res = await respondSwapRequest(requestId, false);
+    await fetchRequests();
+    return res;
+  };
+
+  const handleCancel = async (requestId: string) => {
+    const res = await cancelSwapRequestRpc(requestId);
+    await fetchRequests();
+    return res;
   };
 
   return {
@@ -90,9 +84,10 @@ export function useSwapRequests() {
     allRequests,
     isLoading,
     error,
-    refetch: fetchRequests,
     handleCreateRequest,
     handleApprove,
     handleReject,
+    handleCancel,
+    refetch: fetchRequests,
   };
 }

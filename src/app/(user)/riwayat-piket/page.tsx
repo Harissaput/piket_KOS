@@ -1,367 +1,551 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import TopBar from '@/components/layout/TopBar';
-import { useCompletionLogs } from '@/hooks/useCompletionLogs';
 import { useMembers } from '@/hooks/useMembers';
+import { useSettings } from '@/hooks/useSettings';
 import { useAuth } from '@/context/AuthContext';
 import { useSearch } from '@/context/SearchContext';
 import { createClient } from '@/lib/supabase/client';
+import { ScheduleEpoch, ScheduleOverride, CompletionLog } from '@/types/database';
+import {
+  computeEffectiveDutyRecords,
+  DailyDutyRecord,
+} from '@/lib/reports/stats';
 import { formatLocalDate } from '@/lib/utils/date';
+import { parseISO, format } from 'date-fns';
+import { id as localeId } from 'date-fns/locale';
 import {
   CheckCircle2,
   XCircle,
   ArrowLeftRight,
   Clock,
-  Plus,
+  Filter,
   Check,
   AlertCircle,
   RefreshCw,
+  Edit3,
+  X,
+  Calendar,
 } from 'lucide-react';
 
 export default function RiwayatPiketPage() {
-  const [filterMember, setFilterMember] = useState('Semua');
-  const { logs, isLoading, error, refetch } = useCompletionLogs();
-  const { members } = useMembers();
-  const { member: loggedInMember } = useAuth();
+  const { members, isLoading: loadingMembers } = useMembers(true);
+  const { startDate, hariLibur } = useSettings();
+  const { member: loggedInMember, role } = useAuth();
   const { searchQuery } = useSearch();
 
-  // Modal tandai izin mandiri
-  const [showIzinModal, setShowIzinModal] = useState(false);
-  const [izinDate, setIzinDate] = useState(formatLocalDate(new Date()));
-  const [izinNote, setIzinNote] = useState('');
-  const [isSubmittingIzin, setIsSubmittingIzin] = useState(false);
-  const [izinFeedback, setIzinFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [epochs, setEpochs] = useState<ScheduleEpoch[]>([]);
+  const [overrides, setOverrides] = useState<ScheduleOverride[]>([]);
+  const [logs, setLogs] = useState<CompletionLog[]>([]);
+  const [isLoadingData, setIsLoadingData] = useState(true);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Filters
+  const [filterMember, setFilterMember] = useState('Semua');
+  const [filterStatus, setFilterStatus] = useState<'Semua' | 'selesai' | 'terlewat' | 'izin' | 'ditukar' | 'belum'>('Semua');
+  const [filterMonth, setFilterMonth] = useState('Semua'); // 'YYYY-MM'
+
+  // Pagination / Load More
+  const [displayLimit, setDisplayLimit] = useState(25);
+
+  // Admin Correct Log Modal
+  const [correctingRecord, setCorrectingRecord] = useState<DailyDutyRecord | null>(null);
+  const [correctStatus, setCorrectStatus] = useState<'selesai' | 'terlewat' | 'izin' | 'ditukar'>('selesai');
+  const [correctNote, setCorrectNote] = useState('');
+  const [isSavingCorrection, setIsSavingCorrection] = useState(false);
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const supabase = createClient();
 
-  const handleAjukanIzin = async (e: React.FormEvent) => {
+  const fetchData = useCallback(async () => {
+    setIsLoadingData(true);
+    setErrorMsg(null);
+    try {
+      const todayStr = formatLocalDate(new Date());
+      const effectiveStart = startDate || '2026-08-31';
+
+      const [epochsRes, overridesRes, logsRes] = await Promise.all([
+        supabase.from('schedule_epochs').select('*').order('effective_from', { ascending: true }),
+        supabase.from('schedule_overrides').select('*, original_member:members!original_member_id(*), new_member:members!new_member_id(*)'),
+        supabase.from('completion_logs').select('*, member:members(*)').order('date', { ascending: false }),
+      ]);
+
+      if (epochsRes.error) throw epochsRes.error;
+      if (overridesRes.error) throw overridesRes.error;
+      if (logsRes.error) throw logsRes.error;
+
+      setEpochs((epochsRes.data as ScheduleEpoch[]) || []);
+      setOverrides((overridesRes.data as ScheduleOverride[]) || []);
+      setLogs((logsRes.data as CompletionLog[]) || []);
+    } catch (err: any) {
+      console.error('Gagal memuat riwayat:', err);
+      setErrorMsg(err.message || 'Gagal memuat data riwayat.');
+    } finally {
+      setIsLoadingData(false);
+    }
+  }, [startDate, supabase]);
+
+  useEffect(() => {
+    fetchData();
+
+    const channel = supabase
+      .channel(`riwayat-realtime-${Math.random().toString(36).substring(7)}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'completion_logs' }, () => fetchData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'schedule_overrides' }, () => fetchData())
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [fetchData, supabase]);
+
+  // Hitung riwayat harian utuh (hari tanpa log masa lalu otomatis berstatus terlewat)
+  const allDailyRecords = useMemo(() => {
+    if (members.length === 0) return [];
+    const effectiveStart = startDate || '2026-08-31';
+    const todayStr = formatLocalDate(new Date());
+
+    const records = computeEffectiveDutyRecords(
+      effectiveStart,
+      todayStr,
+      members,
+      epochs,
+      overrides,
+      logs,
+      hariLibur
+    );
+
+    // Filter keluar hari libur (Minggu) agar riwayat hanya berfokus pada hari tugas
+    // Dan urutkan dari tanggal terbaru ke terlama
+    return records.filter((r) => !r.isHoliday).reverse();
+  }, [members, startDate, epochs, overrides, logs, hariLibur]);
+
+  // Daftar bulan yang tersedia untuk filter
+  const availableMonths = useMemo(() => {
+    const monthSet = new Set<string>();
+    allDailyRecords.forEach((r) => {
+      monthSet.add(r.date.substring(0, 7)); // YYYY-MM
+    });
+    return Array.from(monthSet).sort().reverse();
+  }, [allDailyRecords]);
+
+  // Filter gabungan
+  const filteredRecords = useMemo(() => {
+    return allDailyRecords.filter((record) => {
+      const memberName = record.dutyMember?.name || 'Tanpa Petugas';
+      const matchesMember = filterMember === 'Semua' || memberName === filterMember;
+      const matchesStatus = filterStatus === 'Semua' || record.effectiveStatus === filterStatus;
+      const matchesMonth = filterMonth === 'Semua' || record.date.startsWith(filterMonth);
+
+      const matchesSearch =
+        !searchQuery ||
+        memberName.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        record.date.includes(searchQuery) ||
+        record.effectiveStatus.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        (record.log?.note && record.log.note.toLowerCase().includes(searchQuery.toLowerCase())) ||
+        (record.override?.reason && record.override.reason.toLowerCase().includes(searchQuery.toLowerCase()));
+
+      return matchesMember && matchesStatus && matchesMonth && matchesSearch;
+    });
+  }, [allDailyRecords, filterMember, filterStatus, filterMonth, searchQuery]);
+
+  const visibleRecords = filteredRecords.slice(0, displayLimit);
+
+  // Rekap ringkas
+  const countSelesai = filteredRecords.filter((r) => r.effectiveStatus === 'selesai').length;
+  const countTerlewat = filteredRecords.filter((r) => r.effectiveStatus === 'terlewat').length;
+  const countDitukar = filteredRecords.filter((r) => r.effectiveStatus === 'ditukar').length;
+  const countIzin = filteredRecords.filter((r) => r.effectiveStatus === 'izin').length;
+
+  const handleOpenCorrection = (record: DailyDutyRecord) => {
+    setCorrectingRecord(record);
+    const initialStatus =
+      record.effectiveStatus === 'belum' ? 'selesai' : (record.effectiveStatus as any);
+    setCorrectStatus(initialStatus);
+    setCorrectNote(record.log?.note || '');
+  };
+
+  const handleSaveCorrection = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!loggedInMember) {
-      setIzinFeedback({ type: 'error', text: 'Akun Anda belum terhubung dengan slot anggota' });
+    if (!correctingRecord) return;
+
+    const targetMemberId = correctingRecord.dutyMember?.id || correctingRecord.scheduledMember?.id;
+    if (!targetMemberId) {
+      setFeedback({ type: 'error', text: 'Tidak ada anggota yang terkait dengan tanggal ini.' });
       return;
     }
 
-    setIsSubmittingIzin(true);
+    setIsSavingCorrection(true);
     try {
-      // 1. Catat di schedule_overrides sebagai izin
-      const { error: ovError } = await supabase.from('schedule_overrides').insert({
-        date: izinDate,
-        original_member_id: loggedInMember.id,
-        new_member_id: null,
-        reason: 'izin',
-      });
-      if (ovError) throw ovError;
-
-      // 2. Catat di completion_logs sebagai izin
-      const { error: logError } = await supabase.from('completion_logs').upsert(
+      const { error } = await supabase.from('completion_logs').upsert(
         {
-          date: izinDate,
-          member_id: loggedInMember.id,
-          status: 'izin',
-          note: izinNote.trim() ? `Izin mandiri: ${izinNote.trim()}` : 'Izin tidak dapat piket',
+          date: correctingRecord.date,
+          member_id: targetMemberId,
+          status: correctStatus,
+          note: correctNote.trim() ? `[Koreksi Admin] ${correctNote.trim()}` : '[Koreksi Admin]',
+          completed_at: correctStatus === 'selesai' ? new Date().toISOString() : null,
         },
         { onConflict: 'date,member_id' }
       );
-      if (logError) throw logError;
 
-      setIzinFeedback({ type: 'success', text: 'Pemberitahuan izin berhasil dicatat.' });
-      refetch();
-      setTimeout(() => {
-        setShowIzinModal(false);
-        setIzinFeedback(null);
-        setIzinNote('');
-      }, 1500);
+      if (error) throw error;
+
+      setFeedback({ type: 'success', text: `Riwayat piket tanggal ${correctingRecord.date} berhasil diperbarui.` });
+      setCorrectingRecord(null);
+      await fetchData();
     } catch (err: any) {
       console.error(err);
-      setIzinFeedback({ type: 'error', text: err.message || 'Gagal menandai izin.' });
+      setFeedback({ type: 'error', text: err.message || 'Gagal menyimpan koreksi riwayat.' });
     } finally {
-      setIsSubmittingIzin(false);
+      setIsSavingCorrection(false);
     }
   };
 
-  // Filter by Member Pill AND Search Query
-  const filteredLogs = logs.filter((log) => {
-    const memberName = log.member?.name || 'Anggota';
-    const matchesMember = filterMember === 'Semua' || memberName === filterMember;
-    const matchesSearch =
-      !searchQuery ||
-      memberName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      log.date.includes(searchQuery) ||
-      log.status.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (log.note && log.note.toLowerCase().includes(searchQuery.toLowerCase()));
-    return matchesMember && matchesSearch;
-  });
-
-  const totalSelesai = logs.filter((l) => l.status === 'selesai').length;
-  const totalTerlewat = logs.filter((l) => l.status === 'terlewat').length;
-  const totalTukar = logs.filter((l) => l.status === 'ditukar').length;
-  const totalIzin = logs.filter((l) => l.status === 'izin').length;
+  const isLoading = loadingMembers || isLoadingData;
 
   return (
     <div className="space-y-6">
-      <TopBar title="Riwayat Piket" />
+      <TopBar title="Riwayat Piket Kost" />
 
-      {/* Filter Stats Bar */}
-      <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
-        <div className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm flex items-center justify-between">
-          <div>
-            <p className="text-xs font-semibold text-gray-400">Total Selesai</p>
-            <p className="text-2xl font-black text-emerald-600 mt-1">{totalSelesai} Piket</p>
-          </div>
-          <div className="p-3 bg-emerald-50 text-emerald-600 rounded-2xl">
+      {/* Summary Stat Cards */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <div className="bg-white rounded-3xl p-5 border border-gray-100 shadow-sm flex items-center gap-4">
+          <div className="w-12 h-12 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center font-bold">
             <CheckCircle2 className="w-6 h-6" />
           </div>
+          <div>
+            <p className="text-xs text-gray-500 font-semibold">Selesai</p>
+            <p className="text-xl font-black text-gray-900">{countSelesai}</p>
+          </div>
         </div>
 
-        <div className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm flex items-center justify-between">
-          <div>
-            <p className="text-xs font-semibold text-gray-400">Terlewat</p>
-            <p className="text-2xl font-black text-rose-600 mt-1">{totalTerlewat} Piket</p>
-          </div>
-          <div className="p-3 bg-rose-50 text-rose-600 rounded-2xl">
+        <div className="bg-white rounded-3xl p-5 border border-gray-100 shadow-sm flex items-center gap-4">
+          <div className="w-12 h-12 rounded-2xl bg-rose-50 text-rose-600 flex items-center justify-center font-bold">
             <XCircle className="w-6 h-6" />
           </div>
+          <div>
+            <p className="text-xs text-gray-500 font-semibold">Terlewat</p>
+            <p className="text-xl font-black text-gray-900">{countTerlewat}</p>
+          </div>
         </div>
 
-        <div className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm flex items-center justify-between">
-          <div>
-            <p className="text-xs font-semibold text-gray-400">Total Tukar</p>
-            <p className="text-2xl font-black text-amber-600 mt-1">{totalTukar} Kali</p>
-          </div>
-          <div className="p-3 bg-amber-50 text-amber-600 rounded-2xl">
+        <div className="bg-white rounded-3xl p-5 border border-gray-100 shadow-sm flex items-center gap-4">
+          <div className="w-12 h-12 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center font-bold">
             <ArrowLeftRight className="w-6 h-6" />
           </div>
+          <div>
+            <p className="text-xs text-gray-500 font-semibold">Ditukar</p>
+            <p className="text-xl font-black text-gray-900">{countDitukar}</p>
+          </div>
         </div>
 
-        <div className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm flex items-center justify-between">
-          <div>
-            <p className="text-xs font-semibold text-gray-400">Total Izin</p>
-            <p className="text-2xl font-black text-blue-600 mt-1">{totalIzin} Kali</p>
-          </div>
-          <div className="p-3 bg-blue-50 text-blue-600 rounded-2xl">
+        <div className="bg-white rounded-3xl p-5 border border-gray-100 shadow-sm flex items-center gap-4">
+          <div className="w-12 h-12 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center font-bold">
             <Clock className="w-6 h-6" />
+          </div>
+          <div>
+            <p className="text-xs text-gray-500 font-semibold">Izin</p>
+            <p className="text-xl font-black text-gray-900">{countIzin}</p>
           </div>
         </div>
       </div>
 
-      {/* Main Table Card */}
-      <div className="bg-white rounded-3xl p-6 shadow-sm border border-gray-100 space-y-6">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <h2 className="text-lg font-bold text-gray-900">Catatan Aktivitas Piket</h2>
-            <button
-              onClick={() => setShowIzinModal(true)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 transition-colors"
-            >
-              <Plus className="w-3.5 h-3.5" /> Tandai Izin Piket
-            </button>
+      {/* Filter Toolbar */}
+      <div className="bg-white rounded-3xl p-6 border border-gray-100 shadow-sm space-y-4">
+        <div className="flex items-center justify-between gap-4 flex-wrap">
+          <div className="flex items-center gap-2">
+            <Filter className="w-4 h-4 text-gray-400" />
+            <h3 className="text-xs font-bold uppercase tracking-wider text-gray-600">Filter Riwayat</h3>
           </div>
 
-          {/* Dynamic Member Filter Pills */}
-          <div className="flex items-center gap-1.5 bg-gray-100 p-1 rounded-full overflow-x-auto">
-            <button
-              onClick={() => setFilterMember('Semua')}
-              className={`px-3 py-1 rounded-full text-xs font-bold transition-all ${
-                filterMember === 'Semua'
-                  ? 'bg-white text-gray-900 shadow-sm'
-                  : 'text-gray-500 hover:text-gray-900'
-              }`}
-            >
-              Semua
-            </button>
-            {members.map((m) => (
-              <button
-                key={m.id}
-                onClick={() => setFilterMember(m.name)}
-                className={`px-3 py-1 rounded-full text-xs font-bold transition-all ${
-                  filterMember === m.name
-                    ? 'bg-white text-gray-900 shadow-sm'
-                    : 'text-gray-500 hover:text-gray-900'
-                }`}
-              >
-                {m.name}
-              </button>
-            ))}
-          </div>
+          <button
+            onClick={() => fetchData()}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold text-gray-600 bg-gray-50 hover:bg-gray-100 transition-all"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            <span>Muat Ulang</span>
+          </button>
         </div>
 
-        {error && (
-          <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-semibold flex items-center justify-between">
-            <span>{error}</span>
+        <div className="flex items-center gap-3 flex-wrap">
+          {/* Filter Anggota */}
+          <select
+            value={filterMember}
+            onChange={(e) => setFilterMember(e.target.value)}
+            className="px-4 py-2 bg-gray-50 border border-gray-200 rounded-2xl text-xs font-bold text-gray-700 focus:outline-none focus:bg-white"
+          >
+            <option value="Semua">Semua Anggota</option>
+            {members.map((m) => (
+              <option key={m.id} value={m.name}>
+                {m.name} {!m.status_aktif && '(Nonaktif)'}
+              </option>
+            ))}
+          </select>
+
+          {/* Filter Status */}
+          <select
+            value={filterStatus}
+            onChange={(e) => setFilterStatus(e.target.value as any)}
+            className="px-4 py-2 bg-gray-50 border border-gray-200 rounded-2xl text-xs font-bold text-gray-700 focus:outline-none focus:bg-white"
+          >
+            <option value="Semua">Semua Status</option>
+            <option value="selesai">Selesai</option>
+            <option value="terlewat">Terlewat</option>
+            <option value="ditukar">Ditukar</option>
+            <option value="izin">Izin</option>
+            <option value="belum">Belum</option>
+          </select>
+
+          {/* Filter Bulan */}
+          <select
+            value={filterMonth}
+            onChange={(e) => setFilterMonth(e.target.value)}
+            className="px-4 py-2 bg-gray-50 border border-gray-200 rounded-2xl text-xs font-bold text-gray-700 focus:outline-none focus:bg-white"
+          >
+            <option value="Semua">Semua Bulan</option>
+            {availableMonths.map((mStr) => {
+              const d = parseISO(`${mStr}-01`);
+              const label = format(d, 'MMMM yyyy', { locale: localeId });
+              return (
+                <option key={mStr} value={mStr}>
+                  {label}
+                </option>
+              );
+            })}
+          </select>
+        </div>
+      </div>
+
+      {/* Feedback Alert */}
+      {feedback && (
+        <div
+          className={`p-4 rounded-2xl text-xs sm:text-sm font-semibold flex items-start gap-3 ${
+            feedback.type === 'success'
+              ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+              : 'bg-rose-50 text-rose-800 border border-rose-200'
+          }`}
+        >
+          {feedback.type === 'success' ? (
+            <CheckCircle2 className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+          ) : (
+            <AlertCircle className="w-5 h-5 text-rose-600 flex-shrink-0 mt-0.5" />
+          )}
+          <span>{feedback.text}</span>
+        </div>
+      )}
+
+      {/* Table / List */}
+      <div className="bg-white rounded-3xl border border-gray-100 shadow-sm overflow-hidden">
+        {isLoading ? (
+          <div className="p-16 text-center text-xs font-bold text-gray-400">
+            <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2 text-purple-600" />
+            Menghitung riwayat jadwal dan status piket...
+          </div>
+        ) : errorMsg ? (
+          <div className="p-12 text-center text-xs font-bold text-rose-600 space-y-3">
+            <p>{errorMsg}</p>
             <button
-              onClick={() => refetch()}
-              className="px-3 py-1 bg-rose-100 hover:bg-rose-200 rounded-lg text-rose-800 font-bold flex items-center gap-1"
+              onClick={() => fetchData()}
+              className="px-4 py-2 bg-rose-50 text-rose-700 rounded-full font-bold hover:bg-rose-100"
             >
-              <RefreshCw className="w-3.5 h-3.5" /> Coba Lagi
+              Coba Lagi
             </button>
+          </div>
+        ) : visibleRecords.length === 0 ? (
+          <div className="p-16 text-center text-xs font-bold text-gray-400">
+            Tidak ada data riwayat piket yang cocok dengan filter yang dipilih.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse text-xs">
+              <thead>
+                <tr className="border-b border-gray-100 bg-gray-50/70 text-gray-400 font-bold uppercase tracking-wider text-[10px]">
+                  <th className="py-4 px-6">Tanggal</th>
+                  <th className="py-4 px-6">Petugas Piket</th>
+                  <th className="py-4 px-6">Status</th>
+                  <th className="py-4 px-6">Tugas Selesai / Catatan</th>
+                  {role === 'admin' && <th className="py-4 px-6 text-right">Aksi</th>}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {visibleRecords.map((r, idx) => {
+                  const dateObj = parseISO(r.date);
+                  const dateHuman = format(dateObj, 'EEEE, d MMMM yyyy', { locale: localeId });
+                  const isOverridden = Boolean(r.override);
+                  const dutyMemberName = r.dutyMember?.name || 'Tanpa Petugas';
+                  const scheduledMemberName = r.scheduledMember?.name;
+
+                  return (
+                    <tr key={`${r.date}_${idx}`} className="hover:bg-gray-50/50 transition-colors">
+                      <td className="py-4 px-6 font-bold text-gray-900 whitespace-nowrap">
+                        {dateHuman}
+                      </td>
+
+                      <td className="py-4 px-6">
+                        <div className="flex items-center gap-3">
+                          <div
+                            className="w-8 h-8 rounded-full overflow-hidden flex items-center justify-center font-bold text-white text-xs flex-shrink-0"
+                            style={{ backgroundColor: r.dutyMember?.avatar_color || '#a855f7' }}
+                          >
+                            {r.dutyMember?.avatar_url ? (
+                              <img src={r.dutyMember.avatar_url} alt="" className="w-full h-full object-cover" />
+                            ) : (
+                              dutyMemberName.charAt(0)
+                            )}
+                          </div>
+                          <div>
+                            <p className="font-bold text-gray-900">{dutyMemberName}</p>
+                            {isOverridden && scheduledMemberName && scheduledMemberName !== dutyMemberName && (
+                              <p className="text-[10px] text-purple-600 font-semibold">
+                                Menggantikan: {scheduledMemberName} ({r.override?.reason})
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      </td>
+
+                      <td className="py-4 px-6 whitespace-nowrap">
+                        <span
+                          className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider ${
+                            r.effectiveStatus === 'selesai'
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : r.effectiveStatus === 'terlewat'
+                              ? 'bg-rose-100 text-rose-800'
+                              : r.effectiveStatus === 'ditukar'
+                              ? 'bg-blue-100 text-blue-800'
+                              : r.effectiveStatus === 'izin'
+                              ? 'bg-amber-100 text-amber-800'
+                              : 'bg-gray-100 text-gray-600'
+                          }`}
+                        >
+                          {r.effectiveStatus}
+                        </span>
+                      </td>
+
+                      <td className="py-4 px-6 max-w-xs truncate text-gray-600">
+                        {r.log?.completed_tasks && r.log.completed_tasks.length > 0 ? (
+                          <span className="font-semibold text-gray-800">
+                            {r.log.completed_tasks.length} tugas selesai
+                          </span>
+                        ) : null}
+                        {r.log?.note && (
+                          <span className="block text-[11px] text-gray-500 italic truncate">
+                            {r.log.note}
+                          </span>
+                        )}
+                        {!r.log && r.effectiveStatus === 'terlewat' && (
+                          <span className="text-[11px] text-rose-600 italic">
+                            Tidak ada konfirmasi piket
+                          </span>
+                        )}
+                      </td>
+
+                      {role === 'admin' && (
+                        <td className="py-4 px-6 text-right whitespace-nowrap">
+                          <button
+                            onClick={() => handleOpenCorrection(r)}
+                            className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 rounded-full transition-all"
+                            title="Koreksi Catatan Piket"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                            <span>Koreksi</span>
+                          </button>
+                        </td>
+                      )}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         )}
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
-            <thead>
-              <tr className="border-b border-gray-100 text-[11px] font-bold text-gray-400 uppercase tracking-wider">
-                <th className="py-3 px-4">Tanggal</th>
-                <th className="py-3 px-4">Anggota</th>
-                <th className="py-3 px-4">Status</th>
-                <th className="py-3 px-4">Catatan</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-50 text-xs font-medium">
-              {isLoading ? (
-                <tr>
-                  <td colSpan={4} className="text-center py-12 text-gray-400 font-semibold">
-                    Memuat catatan riwayat...
-                  </td>
-                </tr>
-              ) : filteredLogs.length === 0 ? (
-                <tr>
-                  <td colSpan={4} className="text-center py-12 text-gray-400 font-semibold">
-                    Belum ada catatan riwayat piket yang sesuai.
-                  </td>
-                </tr>
-              ) : (
-                filteredLogs.map((log) => (
-                  <tr key={log.id} className="hover:bg-gray-50/60 transition-colors">
-                    <td className="py-4 px-4 font-bold text-gray-900">{log.date}</td>
-                    <td className="py-4 px-4">
-                      <div className="flex items-center gap-2">
-                        <div className="w-6 h-6 rounded-full overflow-hidden border border-gray-200 bg-white">
-                          <img
-                            src={
-                              log.member?.avatar_url ||
-                              `https://api.dicebear.com/7.x/avataaars/svg?seed=${log.member?.name || 'A'}`
-                            }
-                            alt={log.member?.name || 'Anggota'}
-                            className="w-full h-full object-cover"
-                          />
-                        </div>
-                        <span className="font-bold text-gray-800">
-                          {log.member?.name || 'Anggota'}
-                        </span>
-                      </div>
-                    </td>
-                    <td className="py-4 px-4">
-                      {log.status === 'selesai' && (
-                        <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-50 text-emerald-700 text-[11px] font-bold rounded-full">
-                          <CheckCircle2 className="w-3.5 h-3.5" /> Selesai
-                        </span>
-                      )}
-                      {log.status === 'terlewat' && (
-                        <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-rose-50 text-rose-700 text-[11px] font-bold rounded-full">
-                          <XCircle className="w-3.5 h-3.5" /> Terlewat
-                        </span>
-                      )}
-                      {log.status === 'izin' && (
-                        <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-blue-50 text-blue-700 text-[11px] font-bold rounded-full">
-                          Izin
-                        </span>
-                      )}
-                      {log.status === 'ditukar' && (
-                        <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-amber-50 text-amber-700 text-[11px] font-bold rounded-full">
-                          <ArrowLeftRight className="w-3.5 h-3.5" /> Ditukar
-                        </span>
-                      )}
-                      {log.status === 'belum' && (
-                        <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-gray-100 text-gray-700 text-[11px] font-bold rounded-full">
-                          Belum
-                        </span>
-                      )}
-                    </td>
-                    <td className="py-4 px-4 text-gray-500">{log.note || '-'}</td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
+        {/* Load More Button */}
+        {filteredRecords.length > visibleRecords.length && (
+          <div className="p-4 text-center border-t border-gray-100 bg-gray-50/50">
+            <button
+              onClick={() => setDisplayLimit((prev) => prev + 25)}
+              className="px-6 py-2.5 bg-white border border-gray-200 text-gray-700 text-xs font-bold rounded-full hover:bg-gray-100 transition-all shadow-xs"
+            >
+              Muat Lebih Banyak ({filteredRecords.length - visibleRecords.length} tersisa)
+            </button>
+          </div>
+        )}
       </div>
 
-      {/* Modal Tandai Izin Mandiri */}
-      {showIzinModal && (
+      {/* MODAL KOREKSI RIWAYAT OLEH ADMIN */}
+      {correctingRecord && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl p-6 max-w-sm w-full shadow-2xl space-y-4">
-            <div className="flex items-center justify-between border-b border-gray-100 pb-3">
-              <h3 className="text-base font-bold text-gray-900">Tandai Izin Piket</h3>
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 sm:p-8 shadow-2xl border border-gray-100 space-y-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-bold text-gray-900">Koreksi Status Piket</h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Tanggal: {format(parseISO(correctingRecord.date), 'EEEE, d MMMM yyyy', { locale: localeId })}
+                </p>
+              </div>
               <button
-                onClick={() => setShowIzinModal(false)}
-                className="text-gray-400 hover:text-gray-600 font-bold"
+                onClick={() => setCorrectingRecord(null)}
+                className="p-1.5 text-gray-400 hover:text-gray-900 rounded-full"
               >
-                ✕
+                <X className="w-4 h-4" />
               </button>
             </div>
 
-            {izinFeedback && (
-              <div
-                className={`p-3 rounded-2xl flex items-center gap-2 text-xs font-bold ${
-                  izinFeedback.type === 'success'
-                    ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
-                    : 'bg-rose-50 text-rose-800 border border-rose-200'
-                }`}
-              >
-                {izinFeedback.type === 'success' ? (
-                  <Check className="w-4 h-4 text-emerald-600" />
-                ) : (
-                  <AlertCircle className="w-4 h-4 text-rose-600" />
-                )}
-                <span>{izinFeedback.text}</span>
-              </div>
-            )}
-
-            <form onSubmit={handleAjukanIzin} className="space-y-4">
+            <form onSubmit={handleSaveCorrection} className="space-y-4">
               <div>
-                <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5">
-                  Anggota
+                <label className="block text-xs font-bold uppercase tracking-wider text-gray-700 mb-1.5">
+                  Petugas
                 </label>
-                <input
-                  type="text"
-                  disabled
-                  value={loggedInMember?.name || 'Akun tidak bertaut'}
-                  className="w-full px-4 py-2 bg-gray-100 rounded-xl text-xs font-bold text-gray-700 cursor-not-allowed"
-                />
+                <div className="p-3 bg-gray-50 rounded-2xl text-xs font-bold text-gray-900">
+                  {correctingRecord.dutyMember?.name || correctingRecord.scheduledMember?.name || '-'}
+                </div>
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5">
-                  Tanggal Izin
+                <label className="block text-xs font-bold uppercase tracking-wider text-gray-700 mb-1.5">
+                  Pilih Status Baru
                 </label>
-                <input
-                  type="date"
-                  required
-                  value={izinDate}
-                  onChange={(e) => setIzinDate(e.target.value)}
-                  className="w-full px-4 py-2 bg-gray-50 rounded-xl border border-gray-200 text-xs font-semibold text-gray-900"
-                />
+                <select
+                  value={correctStatus}
+                  onChange={(e) => setCorrectStatus(e.target.value as any)}
+                  className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-2xl text-xs font-bold text-gray-900 focus:outline-none focus:bg-white"
+                >
+                  <option value="selesai">Selesai</option>
+                  <option value="terlewat">Terlewat</option>
+                  <option value="izin">Izin</option>
+                  <option value="ditukar">Ditukar</option>
+                </select>
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5">
-                  Alasan / Catatan Izin
+                <label className="block text-xs font-bold uppercase tracking-wider text-gray-700 mb-1.5">
+                  Catatan Koreksi Admin
                 </label>
                 <textarea
-                  rows={2}
-                  value={izinNote}
-                  onChange={(e) => setIzinNote(e.target.value)}
-                  placeholder="Contoh: Sedang sakit / dinas luar kota"
-                  className="w-full px-4 py-2 bg-gray-50 rounded-xl border border-gray-200 text-xs font-semibold text-gray-900 focus:outline-none"
+                  rows={3}
+                  value={correctNote}
+                  onChange={(e) => setCorrectNote(e.target.value)}
+                  placeholder="Contoh: Sudah konfirmasi via WA karena lupa klik di web"
+                  className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-2xl text-xs font-medium text-gray-900 focus:outline-none focus:bg-white focus:border-black"
                 />
               </div>
 
-              <div className="flex gap-2 pt-2">
+              <div className="flex items-center justify-end gap-3 pt-3 border-t border-gray-100">
                 <button
                   type="button"
-                  onClick={() => setShowIzinModal(false)}
-                  className="flex-1 py-2.5 bg-gray-100 text-gray-700 rounded-full text-xs font-bold hover:bg-gray-200"
+                  onClick={() => setCorrectingRecord(null)}
+                  className="px-4 py-2 text-xs font-bold text-gray-600 hover:bg-gray-100 rounded-full transition-all"
                 >
                   Batal
                 </button>
                 <button
                   type="submit"
-                  disabled={isSubmittingIzin || !loggedInMember}
-                  className="flex-1 py-2.5 bg-black text-white rounded-full text-xs font-bold hover:bg-gray-800 disabled:opacity-50"
+                  disabled={isSavingCorrection}
+                  className="px-5 py-2 text-xs font-bold rounded-full bg-[#141416] hover:bg-black text-white transition-all shadow-md disabled:opacity-50"
                 >
-                  {isSubmittingIzin ? 'Menyimpan...' : 'Kirim Izin'}
+                  {isSavingCorrection ? 'Menyimpan...' : 'Simpan Koreksi'}
                 </button>
               </div>
             </form>

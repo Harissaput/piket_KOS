@@ -1,15 +1,38 @@
 import { createClient } from '@/lib/supabase/client';
-import { Member, DaySchedule, ScheduleOverride } from '@/types/database';
+import { Member, DaySchedule, ScheduleOverride, ScheduleEpoch } from '@/types/database';
 import {
-  getDutyMemberForDate,
+  getDutyMemberForDateWithEpochs,
   getWeeklySchedule as computeWeeklySchedule,
 } from '@/lib/algorithms/scheduleRotation';
 import { formatLocalDate } from '@/lib/utils/date';
 
 /**
+ * Fetch all schedule epochs sorted by effective_from ascending.
+ */
+export async function getScheduleEpochs(): Promise<ScheduleEpoch[]> {
+  try {
+    const supabase = createClient();
+    const { data, error } = await supabase
+      .from('schedule_epochs')
+      .select('*')
+      .order('effective_from', { ascending: true });
+
+    if (error) {
+      console.warn('[schedule.service] getScheduleEpochs error:', error.message);
+      return [];
+    }
+
+    return (data as ScheduleEpoch[]) || [];
+  } catch (err) {
+    console.warn('[schedule.service] getScheduleEpochs exception:', err);
+    return [];
+  }
+}
+
+/**
  * Fetch schedule overrides for a date range (YYYY-MM-DD).
  */
-async function getOverridesForRange(
+export async function getOverridesForRange(
   startDate: string,
   endDate: string
 ): Promise<ScheduleOverride[]> {
@@ -34,12 +57,14 @@ async function getOverridesForRange(
 }
 
 /**
- * Get which member is on duty TODAY, respecting any overrides.
+ * Get which member is on duty TODAY, respecting epochs and overrides.
  * Returns null if today is hari libur piket.
  */
 export async function getTodayDutyMember(
   members: Member[],
-  startDate: string
+  startDate: string,
+  epochs: ScheduleEpoch[] = [],
+  hariLibur: string = 'Minggu'
 ): Promise<Member | null> {
   const today = new Date();
   const todayStr = formatLocalDate(today);
@@ -52,19 +77,21 @@ export async function getTodayDutyMember(
     return members.find((m) => m.id === override.new_member_id) || null;
   }
 
-  return getDutyMemberForDate(today, members, startDate);
+  return getDutyMemberForDateWithEpochs(today, members, epochs, startDate, hariLibur);
 }
 
 /**
  * Get full week schedule for a given reference date, merging
- * computed rotation with any persisted overrides.
+ * computed epoch rotation with persisted overrides.
  */
 export async function getWeeklySchedule(
   referenceDate: Date,
   members: Member[],
-  startDate: string
+  startDate: string,
+  epochs: ScheduleEpoch[] = [],
+  hariLibur: string = 'Minggu'
 ): Promise<DaySchedule[]> {
-  const rawSchedule = computeWeeklySchedule(referenceDate, members, startDate);
+  const rawSchedule = computeWeeklySchedule(referenceDate, members, startDate, epochs, hariLibur);
 
   if (rawSchedule.length === 0) return [];
 
@@ -78,11 +105,15 @@ export async function getWeeklySchedule(
     const override = overrideMap.get(day.dateFormatted);
 
     if (override) {
-      const newMember = override.new_member_id
+      const assignedMember = override.new_member_id
         ? members.find((m) => m.id === override.new_member_id) || null
         : null;
 
-      return { ...day, member: newMember, override };
+      return {
+        ...day,
+        member: assignedMember,
+        override,
+      };
     }
 
     return day;

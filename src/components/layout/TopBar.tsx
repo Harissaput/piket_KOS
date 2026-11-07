@@ -9,6 +9,7 @@ import { useMembers } from '@/hooks/useMembers';
 import { useSettings } from '@/hooks/useSettings';
 import { useSchedule } from '@/hooks/useSchedule';
 import { useCompletionLogs } from '@/hooks/useCompletionLogs';
+import { useSwapRequests } from '@/hooks/useSwapRequests';
 import { formatLocalDate } from '@/lib/utils/date';
 import { format } from 'date-fns';
 import { id } from 'date-fns/locale';
@@ -23,6 +24,7 @@ export default function TopBar({ title = 'Ringkasan Piket Kost' }: TopBarProps) 
   const { members } = useMembers();
   const { startDate } = useSettings();
   const { todayMember } = useSchedule(members, startDate);
+  const { pendingRequests } = useSwapRequests();
 
   const [currentTime, setCurrentTime] = useState<Date | null>(null);
   const [notifications, setNotifications] = useState<string[]>([]);
@@ -73,8 +75,16 @@ export default function TopBar({ title = 'Ringkasan Piket Kost' }: TopBarProps) 
       }
     }
 
+    // Notifikasi permintaan tukar yang menunggu
+    const myPending = pendingRequests.filter(
+      (r) => r.status === 'pending' && r.target_member_id === loggedInMember?.id
+    );
+    if (myPending.length > 0) {
+      notifs.push(`Ada ${myPending.length} permintaan tukar jadwal masuk yang menunggu persetujuan Anda.`);
+    }
+
     setNotifications(notifs);
-  }, [todayMember, logs, todayStr, loggedInMember]);
+  }, [todayMember, logs, todayStr, loggedInMember, pendingRequests]);
 
   // Real-time clock update
   useEffect(() => {
